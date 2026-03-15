@@ -137,6 +137,7 @@ async def login(data: LoginData):
             "role"         : "patient",
             "nom"          : patient["nom"],
             "email"        : patient["email"]
+            "medecinNom"   : medecin["nom"] 
         }
 
     else:
