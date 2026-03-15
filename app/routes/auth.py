@@ -136,7 +136,7 @@ async def login(data: LoginData):
             "access_token" : token,
             "role"         : "patient",
             "nom"          : patient["nom"],
-            "email"        : patient["email"]
+            "email"        : patient["email"],
             "medecinNom"   : medecin["nom"] 
         }
 
