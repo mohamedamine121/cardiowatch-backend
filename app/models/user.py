@@ -30,3 +30,4 @@ class TokenResponse(BaseModel):
     role         : str
     nom          : str
     email        : str
+    medecinNom   : Optional[str] = None
