@@ -31,3 +31,4 @@ class TokenResponse(BaseModel):
     nom          : str
     email        : str
     medecinNom   : Optional[str] = None
+    age          : Optional[int] = None
