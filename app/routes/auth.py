@@ -99,11 +99,13 @@ async def login(data: LoginData):
         })
 
         return {
-            "access_token" : token,
-            "role"         : "medecin",
-            "nom"          : medecin["nom"],
-            "email"        : medecin["email"]
-        }
+    "access_token" : token,
+    "role"         : "medecin",
+    "nom"          : medecin["nom"],
+    "email"        : medecin["email"],
+    "identifiant"  : medecin["identifiant"],
+    "medecin_id"   : str(medecin["_id"])
+}
 
     # ── CAS 2 : LOGIN PATIENT ──────────────────────
     elif data.role == "patient":

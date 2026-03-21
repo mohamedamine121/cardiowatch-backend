@@ -37,3 +37,5 @@ class TokenResponse(BaseModel):
     groupe_sanguin : Optional[str] = None
     poids          : Optional[str] = None
     taille         : Optional[str] = None
+    identifiant    : Optional[str] = None
+    medecin_id     : Optional[str] = None
