@@ -3,6 +3,8 @@ from app.models.user import MedecinRegister, PatientRegister, LoginData, TokenRe
 from app.database import medecins_collection, patients_collection
 from app.services.auth_service import hash_password, verify_password, create_jwt, generate_medecin_id
 from datetime import datetime
+from datetime import datetime, timedelta
+
 
 router = APIRouter()
 
@@ -177,3 +179,62 @@ async def update_patient(
     )
 
     return {"message": "Profil mis à jour avec succès"}
+
+    # ── Historique 7 jours ────────────────────────────
+@router.get("/history/{patient_id}")
+async def get_history(patient_id: str):
+    from bson import ObjectId
+
+    # 7 derniers jours
+    today     = datetime.utcnow().replace(
+                  hour=0, minute=0, second=0, microsecond=0)
+    week_ago  = today - timedelta(days=6)
+
+    # Récupérer toutes les fenêtres HRV des 7 derniers jours
+    cursor = db.hrv_windows.find({
+        "patient_id" : patient_id,
+        "timestamp"  : {"$gte": week_ago}
+    }).sort("timestamp", 1)
+
+    windows = await cursor.to_list(length=1000)
+
+    # Organiser par jour
+    days_data = {}
+    for w in windows:
+        day_key = w["timestamp"].strftime("%Y-%m-%d")
+        if day_key not in days_data:
+            days_data[day_key] = []
+
+        days_data[day_key].append({
+            "minute"    : w.get("minute", 0),
+            "timestamp" : w["timestamp"].strftime("%H:%M"),
+            "bpm"       : w.get("mean_bpm", 0),
+            "spo2"      : w.get("spo2", 0),
+            "label"     : w.get("label", 0),
+            "status"    : w.get("status", "Normal"),
+        })
+
+    # Construire les 7 jours
+    result = []
+    for i in range(7):
+        day       = week_ago + timedelta(days=i)
+        day_key   = day.strftime("%Y-%m-%d")
+        sessions  = days_data.get(day_key, [])
+
+        # Statut du jour
+        if not sessions:
+            day_status = "empty"
+        elif any(s["label"] == 1 for s in sessions):
+            day_status = "fa"
+        else:
+            day_status = "normal"
+
+        result.append({
+            "date"      : day_key,
+            "day_name"  : day.strftime("%a"),
+            "day_number": day.day,
+            "status"    : day_status,
+            "sessions"  : sessions,
+        })
+
+    return result
