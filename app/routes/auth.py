@@ -274,3 +274,158 @@ async def get_alerts(patient_id: str):
         })
 
     return result
+
+
+    # ── Liste patients du médecin ─────────────────────
+@router.get("/medecin/patients/{medecin_id}")
+async def get_patients(medecin_id: str):
+    from app.database import db
+
+    # Trouver le médecin
+    medecin = await medecins_collection.find_one(
+        {"identifiant": medecin_id}
+    )
+    if not medecin:
+        raise HTTPException(
+            status_code=404,
+            detail="Médecin introuvable"
+        )
+
+    # Trouver tous les patients de ce médecin
+    cursor = patients_collection.find({
+        "medecin_id": str(medecin["_id"])
+    })
+    patients = await cursor.to_list(length=100)
+
+    result = []
+    for p in patients:
+        # Dernière session
+        last_window = await db.hrv_windows.find_one(
+            {"patient_id": str(p["_id"])},
+            sort=[("timestamp", -1)]
+        )
+
+        # Vérifier FA aujourd'hui
+        from datetime import datetime, timedelta
+        today = datetime.utcnow().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        fa_today = await db.hrv_windows.find_one({
+            "patient_id": str(p["_id"]),
+            "label"     : 1,
+            "timestamp" : {"$gte": today}
+        })
+
+        result.append({
+            "id"            : str(p["_id"]),
+            "nom"           : p.get("nom", ""),
+            "age"           : p.get("age", 0),
+            "email"         : p.get("email", ""),
+            "groupe_sanguin": p.get("groupe_sanguin", ""),
+            "poids"         : p.get("poids", ""),
+            "taille"        : p.get("taille", ""),
+            "has_fa_today"  : fa_today is not None,
+            "last_bpm"      : last_window.get("mean_bpm", 0)
+                              if last_window else None,
+            "last_spo2"     : last_window.get("spo2", 0)
+                              if last_window else None,
+            "last_session"  : last_window["timestamp"].strftime(
+                                "%d/%m/%Y à %H:%M"
+                              ) if last_window else None,
+        })
+
+    return result
+
+
+# ── Alertes FA tous patients du médecin ───────────
+@router.get("/medecin/alerts/{medecin_id}")
+async def get_medecin_alerts(medecin_id: str):
+    from app.database import db
+
+    # Trouver le médecin
+    medecin = await medecins_collection.find_one(
+        {"identifiant": medecin_id}
+    )
+    if not medecin:
+        raise HTTPException(
+            status_code=404,
+            detail="Médecin introuvable"
+        )
+
+    # Trouver tous les patients
+    cursor  = patients_collection.find({
+        "medecin_id": str(medecin["_id"])
+    })
+    patients = await cursor.to_list(length=100)
+    patient_ids = [str(p["_id"]) for p in patients]
+    patient_map = {str(p["_id"]): p["nom"] for p in patients}
+
+    # Trouver toutes les FA
+    cursor = db.hrv_windows.find({
+        "patient_id": {"$in": patient_ids},
+        "label"     : 1
+    }).sort("timestamp", -1)
+    windows = await cursor.to_list(length=500)
+
+    result = []
+    for w in windows:
+        # Message médecin
+        message = await db.messages_medecin.find_one({
+            "window_id": str(w["_id"])
+        })
+        result.append({
+            "id"               : str(w["_id"]),
+            "patient_id"       : w["patient_id"],
+            "patient_nom"      : patient_map.get(
+                                   w["patient_id"], "Inconnu"
+                                 ),
+            "bpm"              : w.get("mean_bpm", 0),
+            "minute"           : w.get("minute", 0),
+            "timestamp"        : w["timestamp"].strftime(
+                                   "%d/%m/%Y à %H:%M"
+                                 ) if "timestamp" in w else "",
+            "traitee"          : message is not None,
+            "message_envoye"   : message["contenu"]
+                                 if message else None,
+        })
+
+    return result
+
+
+# ── Envoyer message au patient ────────────────────
+@router.post("/medecin/message")
+async def send_message(data: dict):
+    from app.database import db
+    from datetime import datetime
+
+    message = {
+        "window_id"  : data.get("window_id"),
+        "patient_id" : data.get("patient_id"),
+        "medecin_id" : data.get("medecin_id"),
+        "contenu"    : data.get("contenu"),
+        "timestamp"  : datetime.utcnow(),
+        "lu_patient" : False
+    }
+    await db.messages_medecin.insert_one(message)
+    return {"message": "Message envoyé avec succès"}
+
+
+# ── Profil médecin ────────────────────────────────
+@router.get("/medecin/profil/{identifiant}")
+async def get_medecin_profil(identifiant: str):
+    medecin = await medecins_collection.find_one(
+        {"identifiant": identifiant}
+    )
+    if not medecin:
+        raise HTTPException(
+            status_code=404,
+            detail="Médecin introuvable"
+        )
+    return {
+        "id"          : str(medecin["_id"]),
+        "nom"         : medecin["nom"],
+        "email"       : medecin["email"],
+        "specialite"  : medecin["specialite"],
+        "telephone"   : medecin["telephone"],
+        "identifiant" : medecin["identifiant"],
+    }
