@@ -244,30 +244,30 @@ async def get_history(patient_id: str):
 async def get_alerts(patient_id: str):
     from app.database import db
 
-    cursor = db.alerts.find({
-        "patient_id": patient_id
+    # Récupérer directement les FA depuis hrv_windows
+    cursor = db.hrv_windows.find({
+        "patient_id" : patient_id,
+        "label"      : 1  # 1 = FA détectée
     }).sort("timestamp", -1)
 
-    alerts = await cursor.to_list(length=100)
+    windows = await cursor.to_list(length=100)
 
     result = []
-    for alert in alerts:
-        # Chercher message médecin
+    for w in windows:
+        # Chercher message médecin si existe
         message = await db.messages_medecin.find_one({
-            "alert_id": str(alert["_id"])
+            "window_id": str(w["_id"])
         })
 
         result.append({
-            "id"          : str(alert["_id"]),
-            "type"        : alert.get("type", "FA_DETECTEE"),
-            "bpm"         : alert.get("bpm", 0),
-            "minute"      : alert.get("minute", 0),
-            "timestamp"   : alert["timestamp"].strftime(
-                              "%d/%m/%Y à %H:%M"
-                            ) if "timestamp" in alert else "",
-            "vue"         : alert.get("vue_medecin", False),
-            "message_medecin": message["contenu"]
-                              if message else None,
+            "id"               : str(w["_id"]),
+            "bpm"              : w.get("mean_bpm", 0),
+            "minute"           : w.get("minute", 0),
+            "timestamp"        : w["timestamp"].strftime(
+                                   "%d/%m/%Y à %H:%M"
+                                 ) if "timestamp" in w else "",
+            "message_medecin"  : message["contenu"]
+                                 if message else None,
             "timestamp_message": message["timestamp"].strftime(
                                    "%d/%m/%Y à %H:%M"
                                  ) if message else None,
