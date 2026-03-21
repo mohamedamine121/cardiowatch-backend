@@ -138,9 +138,42 @@ async def login(data: LoginData):
             "nom"          : patient["nom"],
             "email"        : patient["email"],
             "medecinNom"   : medecin["nom"],
-            "age"          : patient["age"]
+            "age"          : patient["age"],
+            "patient_id"     : str(patient["_id"]),
+            "telephone"      : patient.get("telephone", ""),
+            "groupe_sanguin" : patient.get("groupe_sanguin", ""),
+            "poids"          : patient.get("poids", ""),
+            "taille"         : patient.get("taille", "")
 
         }
 
     else:
         raise HTTPException(status_code=400, detail="Rôle invalide")
+ 
+ # ── Mise à jour profil patient ────────────────────
+@router.put("/update/patient/{patient_id}")
+async def update_patient(
+    patient_id: str,
+    data      : dict
+):
+    from bson import ObjectId
+
+    # Champs autorisés à modifier
+    update_data = {}
+    if "telephone"    in data: update_data["telephone"]    = data["telephone"]
+    if "groupe_sanguin" in data: update_data["groupe_sanguin"] = data["groupe_sanguin"]
+    if "poids"        in data: update_data["poids"]        = data["poids"]
+    if "taille"       in data: update_data["taille"]       = data["taille"]
+
+    if not update_data:
+        raise HTTPException(
+            status_code=400,
+            detail="Aucune donnée à mettre à jour"
+        )
+
+    await patients_collection.update_one(
+        {"_id": ObjectId(patient_id)},
+        {"$set": update_data}
+    )
+
+    return {"message": "Profil mis à jour avec succès"}
