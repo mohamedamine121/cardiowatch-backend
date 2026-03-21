@@ -184,6 +184,7 @@ async def update_patient(
 @router.get("/history/{patient_id}")
 async def get_history(patient_id: str):
     from bson import ObjectId
+    from app.database import db
 
     # 7 derniers jours
     today     = datetime.utcnow().replace(
