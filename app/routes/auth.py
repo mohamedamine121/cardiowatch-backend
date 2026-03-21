@@ -239,3 +239,38 @@ async def get_history(patient_id: str):
         })
 
     return result
+    # ── Alertes patient ───────────────────────────────
+@router.get("/alerts/{patient_id}")
+async def get_alerts(patient_id: str):
+    from app.database import db
+
+    cursor = db.alerts.find({
+        "patient_id": patient_id
+    }).sort("timestamp", -1)
+
+    alerts = await cursor.to_list(length=100)
+
+    result = []
+    for alert in alerts:
+        # Chercher message médecin
+        message = await db.messages_medecin.find_one({
+            "alert_id": str(alert["_id"])
+        })
+
+        result.append({
+            "id"          : str(alert["_id"]),
+            "type"        : alert.get("type", "FA_DETECTEE"),
+            "bpm"         : alert.get("bpm", 0),
+            "minute"      : alert.get("minute", 0),
+            "timestamp"   : alert["timestamp"].strftime(
+                              "%d/%m/%Y à %H:%M"
+                            ) if "timestamp" in alert else "",
+            "vue"         : alert.get("vue_medecin", False),
+            "message_medecin": message["contenu"]
+                              if message else None,
+            "timestamp_message": message["timestamp"].strftime(
+                                   "%d/%m/%Y à %H:%M"
+                                 ) if message else None,
+        })
+
+    return result
