@@ -209,14 +209,17 @@ async def get_history(patient_id: str):
             days_data[day_key] = []
 
         days_data[day_key].append({
-            "minute"    : w.get("minute", 0),
-            "timestamp" : w["timestamp"].strftime("%H:%M"),
-            "bpm"       : w.get("mean_bpm", 0),
-            "spo2"      : w.get("spo2", 0),
-            "label"     : w.get("label", 0),
-            "status"    : w.get("status", "Normal"),
-        })
-
+    "minute"    : w.get("minute", 0),
+    "timestamp" : w["timestamp"].strftime("%H:%M"),
+    "bpm"       : w.get("mean_bpm", 0),
+    "spo2"      : w.get("spo2", 0),
+    "label"     : w.get("label", 0),
+    "status"    : w.get("status", "Normal"),
+    "sdnn"      : w.get("sdnn", 0),
+    "rmssd"     : w.get("rmssd", 0),
+    "pnn50"     : w.get("pnn50", 0),
+    "entropy"   : w.get("entropy", 0),
+})
     # Construire les 7 jours
     result = []
     for i in range(7):
