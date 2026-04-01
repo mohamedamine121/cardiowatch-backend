@@ -408,6 +408,7 @@ async def send_message(data: dict):
         "patient_id" : data.get("patient_id"),
         "medecin_id" : data.get("medecin_id"),
         "contenu"    : data.get("contenu"),
+        "couleur"    : data.get("couleur", "vert"),
         "timestamp"  : datetime.utcnow(),
         "lu_patient" : False
     }
