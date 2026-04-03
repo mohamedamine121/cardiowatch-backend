@@ -137,18 +137,18 @@ async def login(data: LoginData):
         })
 
         return {
-            "access_token" : token,
-            "role"         : "patient",
-            "nom"          : patient["nom"],
-            "email"        : patient["email"],
-            "medecinNom"   : medecin["nom"],
-            "age"          : patient["age"],
-            "patient_id"     : str(patient["_id"]),
-            "telephone"      : patient.get("telephone", ""),
-            "groupe_sanguin" : patient.get("groupe_sanguin", ""),
-            "poids"          : patient.get("poids", ""),
-            "taille"         : patient.get("taille", "")
-
+            "access_token"        : token,
+            "role"                : "patient",
+            "nom"                 : patient["nom"],
+            "email"               : patient["email"],
+            "medecinNom"          : medecin["nom"],
+            "medecinDisponibilite": medecin.get("disponibilite", ""),
+            "age"                 : patient["age"],
+            "patient_id"          : str(patient["_id"]),
+            "telephone"           : patient.get("telephone", ""),
+            "groupe_sanguin"      : patient.get("groupe_sanguin", ""),
+            "poids"               : patient.get("poids", ""),
+            "taille"              : patient.get("taille", "")
         }
 
     else:
@@ -181,7 +181,27 @@ async def update_patient(
     )
 
     return {"message": "Profil mis à jour avec succès"}
+# ── Mise à jour disponibilité médecin ────────────
+@router.put("/update/medecin/disponibilite/{medecin_id}")
+async def update_disponibilite(
+    medecin_id: str,
+    request   : Request
+):
+    try:
+        data = await request.json()
+        disponibilite = data.get("disponibilite", "")
 
+        await db.medecins.update_one(
+            {"_id": ObjectId(medecin_id)},
+            {"$set": {"disponibilite": disponibilite}}
+        )
+        return {
+            "success"      : True,
+            "message"      : "Disponibilité mise à jour",
+            "disponibilite": disponibilite
+        }
+    except Exception as e:
+        return {"success": False, "message": str(e)}
     # ── Historique 7 jours ────────────────────────────
 @router.get("/history/{patient_id}")
 async def get_history(patient_id: str):
