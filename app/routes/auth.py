@@ -448,10 +448,12 @@ async def get_medecin_profil(identifiant: str):
             detail="Médecin introuvable"
         )
     return {
-        "id"          : str(medecin["_id"]),
-        "nom"         : medecin["nom"],
-        "email"       : medecin["email"],
-        "specialite"  : medecin["specialite"],
-        "telephone"   : medecin["telephone"],
-        "identifiant" : medecin["identifiant"],
+        "success"      : True,
+        "id"           : str(medecin["_id"]),
+        "nom"          : medecin["nom"],
+        "email"        : medecin["email"],
+        "specialite"   : medecin["specialite"],
+        "telephone"    : medecin["telephone"],
+        "identifiant"  : medecin["identifiant"],
+        "disponibilite": medecin.get("disponibilite", {}),
     }
