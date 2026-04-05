@@ -185,13 +185,14 @@ async def update_patient(
 @router.put("/update/medecin/disponibilite/{medecin_id}")
 async def update_disponibilite(
     medecin_id: str,
-    request   : Request
+    data      : dict
 ):
     try:
-        data = await request.json()
-        disponibilite = data.get("disponibilite", "")
+        from bson import ObjectId
 
-        await db.medecins.update_one(
+        disponibilite = data.get("disponibilite", {})
+
+        await medecins_collection.update_one(
             {"_id": ObjectId(medecin_id)},
             {"$set": {"disponibilite": disponibilite}}
         )
