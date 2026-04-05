@@ -437,6 +437,16 @@ async def send_message(data: dict):
     return {"message": "Message envoyé avec succès"}
 
 
+# ── DEBUG endpoint ────────────────────────────────
+@router.get("/debug/login/test")
+async def debug_login():
+    medecin = await medecins_collection.find_one(
+        {"identifiant": "MED-2026-4IWRX5"}
+    )
+    return {
+        "disponibilite": dict(medecin.get("disponibilite", {})),
+        "has_dispo"    : "disponibilite" in medecin
+    }
 # ── Profil médecin ────────────────────────────────
 @router.get("/medecin/profil/{identifiant}")
 async def get_medecin_profil(identifiant: str):
