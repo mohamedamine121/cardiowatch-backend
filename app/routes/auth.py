@@ -142,7 +142,7 @@ async def login(data: LoginData):
             "nom"                 : patient["nom"],
             "email"               : patient["email"],
             "medecinNom"          : medecin["nom"],
-            "medecinDisponibilite": medecin.get("disponibilite", ""),
+            "medecinDisponibilite": medecin.get("disponibilite", {}),
             "age"                 : patient["age"],
             "patient_id"          : str(patient["_id"]),
             "telephone"           : patient.get("telephone", ""),
