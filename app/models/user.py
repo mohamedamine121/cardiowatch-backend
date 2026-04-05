@@ -26,16 +26,17 @@ class LoginData(BaseModel):
 
 # ── Modèle Réponse Token ──────────────────────────
 class TokenResponse(BaseModel):
-    access_token   : str
-    role           : str
-    nom            : str
-    email          : str
-    medecinNom     : Optional[str] = None
-    age            : Optional[int] = None
-    patient_id     : Optional[str] = None
-    telephone      : Optional[str] = None
-    groupe_sanguin : Optional[str] = None
-    poids          : Optional[str] = None
-    taille         : Optional[str] = None
-    identifiant    : Optional[str] = None
-    medecin_id     : Optional[str] = None
+    access_token          : str
+    role                  : str
+    nom                   : str
+    email                 : str
+    medecinNom            : Optional[str]  = None
+    medecinDisponibilite  : Optional[dict] = None
+    age                   : Optional[int]  = None
+    patient_id            : Optional[str]  = None
+    telephone             : Optional[str]  = None
+    groupe_sanguin        : Optional[str]  = None
+    poids                 : Optional[str]  = None
+    taille                : Optional[str]  = None
+    identifiant           : Optional[str]  = None
+    medecin_id            : Optional[str]  = None
