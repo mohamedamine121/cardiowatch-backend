@@ -22,7 +22,7 @@ async def analyze_session(data: dict):
     fs         = data.get("fs", 100)
     spo2       = data.get("spo2", 0)
 
-    if len(ir_signal) < 100:
+    if len(ir_signal) < 50:
     raise HTTPException(
         status_code = 400,
         detail      = "Signal PPG insuffisant"
