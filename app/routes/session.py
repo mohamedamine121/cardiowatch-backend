@@ -14,6 +14,7 @@ async def analyze_session(data: dict):
     ir_signal  = data.get("ir_signal", [])
     fs         = data.get("fs", 100)
     spo2       = data.get("spo2", 0)
+    duration   = data.get("duration_ms", 0)
 
     if len(ir_signal) < 50:
         raise HTTPException(
@@ -21,18 +22,24 @@ async def analyze_session(data: dict):
             detail      = "Signal PPG insuffisant"
         )
 
-    # ── 2. Convertir en numpy ─────────────────────
+    # ── 2. Calculer fs réelle si duration fournie ─
+    # Si ESP32 envoie la durée réelle d'acquisition
+    if duration > 0:
+        fs_reel = len(ir_signal) / (duration / 1000.0)
+        fs      = round(fs_reel, 1)
+
+    # ── 3. Convertir en numpy ─────────────────────
     signal = np.array(ir_signal, dtype=np.float64)
 
-    # ── 3. Vérifier signal valide ─────────────────
+    # ── 4. Vérifier signal valide ─────────────────
     signal_range = np.max(signal) - np.min(signal)
     if signal_range < 100:
         raise HTTPException(
             status_code = 422,
-            detail      = "Signal PPG plat — pas de pulsation détectée"
+            detail      = "Signal PPG plat"
         )
 
-    # ── 4. Filtrage Butterworth 0.5-8 Hz ──────────
+    # ── 5. Filtrage Butterworth 0.5-8 Hz ──────────
     try:
         from scipy.signal import butter, filtfilt
         b, a = butter(
@@ -47,11 +54,10 @@ async def analyze_session(data: dict):
             detail      = f"Erreur filtrage : {e}"
         )
 
-    # ── 5. Calcul BPM via HeartPy ─────────────────
+    # ── 6. Calcul BPM via HeartPy ─────────────────
     try:
         import heartpy as hp
 
-        # Paramètres HeartPy optimisés pour PPG
         working_data, measures = hp.process(
             signal_filtre,
             sample_rate    = float(fs),
@@ -68,9 +74,11 @@ async def analyze_session(data: dict):
             detail      = f"Erreur HeartPy : {e}"
         )
 
-    # ── 6. Retourner résultat ─────────────────────
+    # ── 7. Retourner résultat ─────────────────────
     return {
-        "success": True,
-        "bpm"    : bpm,
-        "spo2"   : spo2,
+        "success" : True,
+        "bpm"     : bpm,
+        "spo2"    : spo2,
+        "fs_reel" : fs,
+        "n_pts"   : len(ir_signal),
     }
