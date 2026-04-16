@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes import auth
+from app.routes import session
 
 # ── Créer l'application FastAPI ───────────────────
 app = FastAPI(
@@ -19,7 +20,16 @@ app.add_middleware(
 )
 
 # ── Inclure les routes ────────────────────────────
-app.include_router(auth.router, prefix="/api/auth", tags=["Authentification"])
+app.include_router(
+    auth.router,
+    prefix = "/api/auth",
+    tags   = ["Authentification"]
+)
+app.include_router(
+    session.router,
+    prefix = "/api/session",
+    tags   = ["Session PPG"]
+)
 
 # ── Route de test ─────────────────────────────────
 @app.get("/")
