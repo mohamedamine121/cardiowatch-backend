@@ -599,7 +599,32 @@ async def get_medecin_profil(identifiant: str):
             "disponibilite", {}),
     }
 
+# ── Sauvegarder photo profil patient ─────────────
+@router.put("/update/patient/{patient_id}/photo")
+async def update_patient_photo(
+    patient_id: str,
+    data      : dict
+):
+    from bson import ObjectId
 
+    photo_url = data.get("photo_url", "")
+
+    if not photo_url:
+        raise HTTPException(
+            status_code=400,
+            detail="URL photo requise"
+        )
+
+    await patients_collection.update_one(
+        {"_id": ObjectId(patient_id)},
+        {"$set": {"photo_url": photo_url}}
+    )
+
+    return {
+        "success"  : True,
+        "message"  : "Photo mise à jour",
+        "photo_url": photo_url
+    }
 # ── Mot de passe oublié ───────────────────────────
 @router.post("/forgot-password")
 async def forgot_password(data: dict):
