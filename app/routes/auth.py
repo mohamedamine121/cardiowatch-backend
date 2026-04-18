@@ -480,6 +480,7 @@ async def get_patients(medecin_id: str):
             "groupe_sanguin": p.get("groupe_sanguin", ""),
             "poids"         : p.get("poids",          ""),
             "taille"        : p.get("taille",         ""),
+            "photo_url"     : p.get("photo_url",      ""), 
             "has_fa_today"  : fa_today is not None,
             "last_bpm"      : last_window.get(
                 "mean_bpm", 0) if last_window else None,
