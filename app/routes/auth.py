@@ -274,6 +274,8 @@ async def login(data: LoginData):
                 "groupe_sanguin", ""),
             "poids"               : patient.get(
                 "poids", ""),
+            "photo_url"           : patient.get(  
+                "photo_url", ""),
             "taille"              : patient.get(
                 "taille", "")
         }
