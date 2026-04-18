@@ -468,3 +468,303 @@ async def get_medecin_profil(identifiant: str):
         "identifiant"  : medecin["identifiant"],
         "disponibilite": medecin.get("disponibilite", {}),
     }
+
+import secrets
+import os
+from datetime  import datetime, timedelta
+from fastapi   import APIRouter, HTTPException
+from fastapi.responses import HTMLResponse
+
+# ── Stockage temporaire tokens reset ─────────────
+reset_tokens: dict = {}
+
+# ── Config email ──────────────────────────────────
+from fastapi_mail import (
+    FastMail, MessageSchema, ConnectionConfig
+)
+
+conf = ConnectionConfig(
+    MAIL_USERNAME   = os.getenv("MAIL_USERNAME"),
+    MAIL_PASSWORD   = os.getenv("MAIL_PASSWORD"),
+    MAIL_FROM       = os.getenv("MAIL_FROM"),
+    MAIL_PORT       = 587,
+    MAIL_SERVER     = "smtp.gmail.com",
+    MAIL_STARTTLS   = True,
+    MAIL_SSL_TLS    = False,
+    USE_CREDENTIALS = True,
+)
+
+# ── Endpoint 1 : Demander reset ───────────────────
+@router.post("/forgot-password")
+async def forgot_password(data: dict):
+    email = data.get("email", "").strip().lower()
+
+    if not email:
+        raise HTTPException(
+            status_code=400,
+            detail="Email requis"
+        )
+
+    patient = await db.patients.find_one(
+        {"email": email}
+    )
+    medecin = await db.medecins.find_one(
+        {"email": email}
+    )
+
+    # Sécurité : même réponse si email existe ou non
+    if not patient and not medecin:
+        return {
+            "success": True,
+            "message": "Si cet email existe, "
+                       "un lien a été envoyé."
+        }
+
+    token     = secrets.token_urlsafe(32)
+    expire_at = datetime.utcnow() + timedelta(hours=1)
+    role      = "patient" if patient else "medecin"
+
+    reset_tokens[token] = {
+        "email"    : email,
+        "role"     : role,
+        "expire_at": expire_at,
+    }
+
+    reset_link = (
+        "https://cardiowatch-backend.onrender.com"
+        f"/api/auth/reset-password-page?token={token}"
+    )
+
+    try:
+        message = MessageSchema(
+            subject    = "CardioWatch — Réinitialisation"
+                         " de votre mot de passe",
+            recipients = [email],
+            body       = f"""
+<!DOCTYPE html>
+<html>
+<body style="font-family:Arial,sans-serif;
+             background:#f5f5f5;padding:20px">
+  <div style="max-width:500px;margin:0 auto;
+              background:white;border-radius:16px;
+              padding:32px">
+    <h2 style="color:#1A73E8;text-align:center">
+      ❤️ CardioWatch
+    </h2>
+    <p style="color:#333">Bonjour,</p>
+    <p style="color:#333">
+      Vous avez demandé la réinitialisation de votre
+      mot de passe. Cliquez sur le bouton ci-dessous :
+    </p>
+    <div style="text-align:center;margin:32px 0">
+      <a href="{reset_link}"
+         style="background:#1A73E8;color:white;
+                padding:14px 32px;border-radius:8px;
+                text-decoration:none;font-weight:bold">
+        Réinitialiser mon mot de passe
+      </a>
+    </div>
+    <p style="color:#999;font-size:12px">
+      Ce lien expire dans <strong>1 heure</strong>.
+      Si vous n'avez pas fait cette demande,
+      ignorez cet email.
+    </p>
+  </div>
+</body>
+</html>
+            """,
+            subtype = "html",
+        )
+        fm = FastMail(conf)
+        await fm.send_message(message)
+    except Exception as e:
+        print(f"Erreur email : {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur envoi email"
+        )
+
+    return {
+        "success": True,
+        "message": "Si cet email existe, "
+                   "un lien a été envoyé."
+    }
+
+# ── Endpoint 2 : Page HTML reset ─────────────────
+@router.get("/reset-password-page")
+async def reset_password_page(token: str):
+    return HTMLResponse(content=f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,
+        initial-scale=1.0">
+  <title>CardioWatch — Nouveau mot de passe</title>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:Arial,sans-serif;
+         background:#f5f7fa;display:flex;
+         align-items:center;justify-content:center;
+         min-height:100vh;padding:20px}}
+    .card{{background:white;border-radius:16px;
+           padding:32px;width:100%;max-width:400px;
+           box-shadow:0 4px 20px rgba(0,0,0,0.08)}}
+    h2{{color:#1A73E8;text-align:center;
+        margin-bottom:8px}}
+    .sub{{color:#999;font-size:14px;
+          text-align:center;margin-bottom:24px}}
+    label{{display:block;font-size:14px;color:#555;
+           margin-bottom:6px;font-weight:500}}
+    input{{width:100%;padding:12px 16px;
+           border:1.5px solid #ddd;
+           border-radius:8px;font-size:15px;
+           margin-bottom:16px;outline:none}}
+    input:focus{{border-color:#1A73E8}}
+    button{{width:100%;padding:14px;
+            background:#1A73E8;color:white;
+            border:none;border-radius:8px;
+            font-size:16px;font-weight:bold;
+            cursor:pointer}}
+    button:disabled{{background:#aaa;cursor:not-allowed}}
+    .msg{{margin-top:16px;padding:12px 16px;
+          border-radius:8px;font-size:14px;
+          display:none}}
+    .success{{background:#e8f5e9;color:#2e7d32;
+              border:1px solid #a5d6a7}}
+    .error{{background:#ffebee;color:#c62828;
+            border:1px solid #ef9a9a}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>❤️ CardioWatch</h2>
+    <p class="sub">Nouveau mot de passe</p>
+    <form id="form">
+      <label>Nouveau mot de passe</label>
+      <input type="password" id="pwd1"
+             placeholder="Min. 6 caractères"
+             required minlength="6">
+      <label>Confirmer le mot de passe</label>
+      <input type="password" id="pwd2"
+             placeholder="Répétez le mot de passe"
+             required minlength="6">
+      <button type="submit" id="btn">
+        Réinitialiser
+      </button>
+    </form>
+    <div class="msg" id="msg"></div>
+  </div>
+  <script>
+    document.getElementById('form')
+      .addEventListener('submit', async (e) => {{
+        e.preventDefault();
+        const p1  = document.getElementById('pwd1').value;
+        const p2  = document.getElementById('pwd2').value;
+        const btn = document.getElementById('btn');
+        const msg = document.getElementById('msg');
+        if (p1 !== p2) {{
+          msg.className='msg error';
+          msg.style.display='block';
+          msg.textContent=
+            'Les mots de passe ne correspondent pas.';
+          return;
+        }}
+        btn.disabled=true;
+        btn.textContent='Envoi...';
+        try {{
+          const res = await fetch(
+            '/api/auth/reset-password',
+            {{
+              method:'POST',
+              headers:{{'Content-Type':'application/json'}},
+              body:JSON.stringify({{
+                token:'{token}',password:p1
+              }})
+            }}
+          );
+          const data = await res.json();
+          if (data.success) {{
+            msg.className='msg success';
+            msg.style.display='block';
+            msg.textContent=
+              '✅ Mot de passe modifié ! '
+              'Retournez à l\'application.';
+            document.getElementById('form')
+              .style.display='none';
+          }} else {{
+            msg.className='msg error';
+            msg.style.display='block';
+            msg.textContent=
+              data.detail||'Erreur. Réessayez.';
+            btn.disabled=false;
+            btn.textContent='Réinitialiser';
+          }}
+        }} catch(err) {{
+          msg.className='msg error';
+          msg.style.display='block';
+          msg.textContent='Erreur réseau.';
+          btn.disabled=false;
+          btn.textContent='Réinitialiser';
+        }}
+      }});
+  </script>
+</body>
+</html>
+    """)
+
+# ── Endpoint 3 : Traiter reset ────────────────────
+@router.post("/reset-password")
+async def reset_password(data: dict):
+    token    = data.get("token",    "")
+    password = data.get("password", "")
+
+    if not token or not password:
+        raise HTTPException(
+            status_code=400,
+            detail="Token et mot de passe requis"
+        )
+
+    if len(password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="Minimum 6 caractères"
+        )
+
+    token_data = reset_tokens.get(token)
+    if not token_data:
+        raise HTTPException(
+            status_code=400,
+            detail="Lien invalide ou expiré"
+        )
+
+    if datetime.utcnow() > token_data["expire_at"]:
+        del reset_tokens[token]
+        raise HTTPException(
+            status_code=400,
+            detail="Lien expiré. "
+                   "Faites une nouvelle demande."
+        )
+
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(
+        schemes=["bcrypt"], deprecated="auto"
+    )
+    hashed = pwd_context.hash(password)
+
+    collection = (
+        db.patients
+        if token_data["role"] == "patient"
+        else db.medecins
+    )
+    await collection.update_one(
+        {"email": token_data["email"]},
+        {"$set" : {"password": hashed}}
+    )
+
+    del reset_tokens[token]
+
+    return {
+        "success": True,
+        "message": "Mot de passe réinitialisé !"
+    }
