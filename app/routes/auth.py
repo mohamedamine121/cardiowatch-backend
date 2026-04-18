@@ -52,6 +52,82 @@ async def register_medecin(data: MedecinRegister):
 
     await medecins_collection.insert_one(medecin)
 
+    # ── Envoyer identifiant par email ─────────────
+    try:
+        message = MessageSchema(
+            subject    = "CardioWatch — "
+                         "Votre identifiant médecin",
+            recipients = [data.email],
+            body       = f"""
+<!DOCTYPE html>
+<html>
+<body style="font-family:Arial,sans-serif;
+             background:#f5f5f5;padding:20px">
+  <div style="max-width:500px;margin:0 auto;
+              background:white;border-radius:16px;
+              padding:32px">
+    <h2 style="color:#1A73E8;text-align:center">
+      ❤️ CardioWatch
+    </h2>
+    <p style="color:#333">
+      Bonjour Dr. {data.nom},
+    </p>
+    <p style="color:#333">
+      Votre compte médecin a été créé avec succès !
+      Voici votre identifiant unique à partager
+      avec vos patients :
+    </p>
+    <div style="text-align:center;margin:32px 0">
+      <div style="background:#f0f4ff;
+                  border:2px solid #1A73E8;
+                  border-radius:12px;
+                  padding:20px;
+                  display:inline-block">
+        <p style="color:#999;font-size:13px;
+                  margin:0 0 8px">
+          Identifiant Médecin
+        </p>
+        <p style="color:#1A73E8;font-size:28px;
+                  font-weight:bold;
+                  letter-spacing:2px;margin:0">
+          {medecin_id}
+        </p>
+      </div>
+    </div>
+    <p style="color:#333">
+      Partagez cet identifiant avec vos patients
+      pour qu'ils puissent s'inscrire sur
+      CardioWatch et être associés à votre compte.
+    </p>
+    <div style="background:#fff3cd;
+                border-radius:8px;
+                padding:12px 16px;
+                margin:16px 0">
+      <p style="color:#856404;font-size:13px;
+                margin:0">
+        ⚠️ Gardez cet identifiant en lieu sûr.
+        Il est unique et lié à votre compte.
+      </p>
+    </div>
+    <hr style="border:none;border-top:1px solid #eee;
+               margin:24px 0">
+    <p style="color:#ccc;font-size:11px;
+              text-align:center">
+      CardioWatch — Système de surveillance cardiaque
+    </p>
+  </div>
+</body>
+</html>
+            """,
+            subtype="html",
+        )
+        fm = FastMail(conf)
+        await fm.send_message(message)
+        print(f"✅ Email identifiant envoyé à {data.email}")
+    except Exception as e:
+        # Ne pas bloquer l'inscription si email échoue
+        print(f"⚠️ Erreur email identifiant : {e}")
+
     return {
         "message"    : "Médecin inscrit avec succès",
         "identifiant": medecin_id,
@@ -219,13 +295,13 @@ async def update_patient(
 
     update_data = {}
     if "telephone"      in data:
-        update_data["telephone"]     = data["telephone"]
+        update_data["telephone"]      = data["telephone"]
     if "groupe_sanguin" in data:
-        update_data["groupe_sanguin"]= data["groupe_sanguin"]
+        update_data["groupe_sanguin"] = data["groupe_sanguin"]
     if "poids"          in data:
-        update_data["poids"]         = data["poids"]
+        update_data["poids"]          = data["poids"]
     if "taille"         in data:
-        update_data["taille"]        = data["taille"]
+        update_data["taille"]         = data["taille"]
 
     if not update_data:
         raise HTTPException(
@@ -535,7 +611,6 @@ async def forgot_password(data: dict):
             detail="Email requis"
         )
 
-    # ✅ FIX : utiliser collections correctes
     patient = await patients_collection.find_one(
         {"email": email}
     )
@@ -786,7 +861,6 @@ async def reset_password(data: dict):
     )
     hashed = pwd_context.hash(password)
 
-    # ✅ FIX : utiliser collections correctes
     collection = (
         patients_collection
         if token_data["role"] == "patient"
