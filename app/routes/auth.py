@@ -2,79 +2,102 @@ from fastapi import APIRouter, HTTPException
 from app.models.user import MedecinRegister, PatientRegister, LoginData, TokenResponse
 from app.database import medecins_collection, patients_collection
 from app.services.auth_service import hash_password, verify_password, create_jwt, generate_medecin_id
-from datetime import datetime
 from datetime import datetime, timedelta
-
+from fastapi.responses import HTMLResponse
+import secrets
+import os
 
 router = APIRouter()
+
+# ── Stockage temporaire tokens reset ─────────────
+reset_tokens: dict = {}
+
+# ── Config email ──────────────────────────────────
+from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
+
+conf = ConnectionConfig(
+    MAIL_USERNAME   = os.getenv("MAIL_USERNAME"),
+    MAIL_PASSWORD   = os.getenv("MAIL_PASSWORD"),
+    MAIL_FROM       = os.getenv("MAIL_FROM"),
+    MAIL_PORT       = 587,
+    MAIL_SERVER     = "smtp.gmail.com",
+    MAIL_STARTTLS   = True,
+    MAIL_SSL_TLS    = False,
+    USE_CREDENTIALS = True,
+)
 
 # ── Inscription Médecin ───────────────────────────
 @router.post("/register/medecin")
 async def register_medecin(data: MedecinRegister):
-
-    # Vérifier si email existe déjà
-    existing = await medecins_collection.find_one({"email": data.email})
+    existing = await medecins_collection.find_one(
+        {"email": data.email}
+    )
     if existing:
-        raise HTTPException(status_code=400, detail="Email déjà utilisé")
+        raise HTTPException(
+            status_code=400,
+            detail="Email déjà utilisé"
+        )
 
-    # Générer identifiant unique médecin
     medecin_id = generate_medecin_id()
 
-    # Créer le document médecin
     medecin = {
-        "identifiant"  : medecin_id,
-        "nom"          : data.nom,
-        "email"        : data.email,
-        "password"     : hash_password(data.password),
-        "specialite"   : data.specialite,
-        "telephone"    : data.telephone,
-        "created_at"   : datetime.utcnow()
+        "identifiant": medecin_id,
+        "nom"        : data.nom,
+        "email"      : data.email,
+        "password"   : hash_password(data.password),
+        "specialite" : data.specialite,
+        "telephone"  : data.telephone,
+        "created_at" : datetime.utcnow()
     }
 
-    # Sauvegarder dans MongoDB
     await medecins_collection.insert_one(medecin)
 
     return {
-        "message"      : "Médecin inscrit avec succès",
-        "identifiant"  : medecin_id,
-        "nom"          : data.nom,
-        "email"        : data.email
+        "message"    : "Médecin inscrit avec succès",
+        "identifiant": medecin_id,
+        "nom"        : data.nom,
+        "email"      : data.email
     }
 
 
 # ── Inscription Patient ───────────────────────────
 @router.post("/register/patient")
 async def register_patient(data: PatientRegister):
-
-    # Vérifier si email existe déjà
-    existing = await patients_collection.find_one({"email": data.email})
+    existing = await patients_collection.find_one(
+        {"email": data.email}
+    )
     if existing:
-        raise HTTPException(status_code=400, detail="Email déjà utilisé")
+        raise HTTPException(
+            status_code=400,
+            detail="Email déjà utilisé"
+        )
 
-    # Vérifier que le médecin existe
-    medecin = await medecins_collection.find_one({"identifiant": data.medecin_id})
+    medecin = await medecins_collection.find_one(
+        {"identifiant": data.medecin_id}
+    )
     if not medecin:
-        raise HTTPException(status_code=404, detail="Identifiant médecin invalide")
+        raise HTTPException(
+            status_code=404,
+            detail="Identifiant médecin invalide"
+        )
 
-    # Créer le document patient
     patient = {
-        "nom"          : data.nom,
-        "email"        : data.email,
-        "password"     : hash_password(data.password),
-        "age"          : data.age,
-        "medecin_id"   : str(medecin["_id"]),
-        "medecin_identifiant" : data.medecin_id,
-        "created_at"   : datetime.utcnow()
+        "nom"                : data.nom,
+        "email"              : data.email,
+        "password"           : hash_password(data.password),
+        "age"                : data.age,
+        "medecin_id"         : str(medecin["_id"]),
+        "medecin_identifiant": data.medecin_id,
+        "created_at"         : datetime.utcnow()
     }
 
-    # Sauvegarder dans MongoDB
     await patients_collection.insert_one(patient)
 
     return {
-        "message"      : "Patient inscrit avec succès",
-        "nom"          : data.nom,
-        "email"        : data.email,
-        "medecin"      : medecin["nom"]
+        "message": "Patient inscrit avec succès",
+        "nom"    : data.nom,
+        "email"  : data.email,
+        "medecin": medecin["nom"]
     }
 
 
@@ -82,58 +105,81 @@ async def register_patient(data: PatientRegister):
 @router.post("/login", response_model=TokenResponse)
 async def login(data: LoginData):
 
-    # ── CAS 1 : LOGIN MÉDECIN ──────────────────────
     if data.role == "medecin":
-
-        medecin = await medecins_collection.find_one({"email": data.email})
+        medecin = await medecins_collection.find_one(
+            {"email": data.email}
+        )
         if not medecin:
-            raise HTTPException(status_code=404, detail="Médecin introuvable")
-
-        if not verify_password(data.password, medecin["password"]):
-            raise HTTPException(status_code=401, detail="Mot de passe incorrect")
+            raise HTTPException(
+                status_code=404,
+                detail="Médecin introuvable"
+            )
+        if not verify_password(
+                data.password, medecin["password"]):
+            raise HTTPException(
+                status_code=401,
+                detail="Mot de passe incorrect"
+            )
 
         token = create_jwt({
-            "medecin_id"   : str(medecin["_id"]),
-            "identifiant"  : medecin["identifiant"],
-            "role"         : "medecin"
+            "medecin_id" : str(medecin["_id"]),
+            "identifiant": medecin["identifiant"],
+            "role"       : "medecin"
         })
 
         return {
-    "access_token" : token,
-    "role"         : "medecin",
-    "nom"          : medecin["nom"],
-    "email"        : medecin["email"],
-    "identifiant"  : medecin["identifiant"],
-    "medecin_id"   : str(medecin["_id"])
-}
+            "access_token": token,
+            "role"        : "medecin",
+            "nom"         : medecin["nom"],
+            "email"       : medecin["email"],
+            "identifiant" : medecin["identifiant"],
+            "medecin_id"  : str(medecin["_id"])
+        }
 
-    # ── CAS 2 : LOGIN PATIENT ──────────────────────
     elif data.role == "patient":
-
         if not data.medecin_id:
-            raise HTTPException(status_code=400, detail="Identifiant médecin requis")
+            raise HTTPException(
+                status_code=400,
+                detail="Identifiant médecin requis"
+            )
 
-        # Vérifier médecin
-        medecin = await medecins_collection.find_one({"identifiant": data.medecin_id})
+        medecin = await medecins_collection.find_one(
+            {"identifiant": data.medecin_id}
+        )
         if not medecin:
-            raise HTTPException(status_code=404, detail="Identifiant médecin invalide")
+            raise HTTPException(
+                status_code=404,
+                detail="Identifiant médecin invalide"
+            )
 
-        # Vérifier patient
-        patient = await patients_collection.find_one({"email": data.email})
+        patient = await patients_collection.find_one(
+            {"email": data.email}
+        )
         if not patient:
-            raise HTTPException(status_code=404, detail="Patient introuvable")
+            raise HTTPException(
+                status_code=404,
+                detail="Patient introuvable"
+            )
 
-        # Vérifier que le patient appartient à ce médecin
-        if patient["medecin_identifiant"] != data.medecin_id:
-            raise HTTPException(status_code=403, detail="Ce patient n'appartient pas à ce médecin")
+        if patient["medecin_identifiant"] != \
+                data.medecin_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Ce patient n'appartient "
+                       "pas à ce médecin"
+            )
 
-        if not verify_password(data.password, patient["password"]):
-            raise HTTPException(status_code=401, detail="Mot de passe incorrect")
+        if not verify_password(
+                data.password, patient["password"]):
+            raise HTTPException(
+                status_code=401,
+                detail="Mot de passe incorrect"
+            )
 
         token = create_jwt({
-            "patient_id"   : str(patient["_id"]),
-            "medecin_id"   : str(medecin["_id"]),
-            "role"         : "patient"
+            "patient_id": str(patient["_id"]),
+            "medecin_id": str(medecin["_id"]),
+            "role"      : "patient"
         })
 
         return {
@@ -142,19 +188,28 @@ async def login(data: LoginData):
             "nom"                 : patient["nom"],
             "email"               : patient["email"],
             "medecinNom"          : medecin["nom"],
-            "medecinDisponibilite": dict(medecin.get("disponibilite", {})),
+            "medecinDisponibilite": dict(
+                medecin.get("disponibilite", {})),
             "age"                 : patient["age"],
             "patient_id"          : str(patient["_id"]),
-            "telephone"           : patient.get("telephone", ""),
-            "groupe_sanguin"      : patient.get("groupe_sanguin", ""),
-            "poids"               : patient.get("poids", ""),
-            "taille"              : patient.get("taille", "")
+            "telephone"           : patient.get(
+                "telephone", ""),
+            "groupe_sanguin"      : patient.get(
+                "groupe_sanguin", ""),
+            "poids"               : patient.get(
+                "poids", ""),
+            "taille"              : patient.get(
+                "taille", "")
         }
 
     else:
-        raise HTTPException(status_code=400, detail="Rôle invalide")
- 
- # ── Mise à jour profil patient ────────────────────
+        raise HTTPException(
+            status_code=400,
+            detail="Rôle invalide"
+        )
+
+
+# ── Mise à jour profil patient ────────────────────
 @router.put("/update/patient/{patient_id}")
 async def update_patient(
     patient_id: str,
@@ -162,12 +217,15 @@ async def update_patient(
 ):
     from bson import ObjectId
 
-    # Champs autorisés à modifier
     update_data = {}
-    if "telephone"    in data: update_data["telephone"]    = data["telephone"]
-    if "groupe_sanguin" in data: update_data["groupe_sanguin"] = data["groupe_sanguin"]
-    if "poids"        in data: update_data["poids"]        = data["poids"]
-    if "taille"       in data: update_data["taille"]       = data["taille"]
+    if "telephone"      in data:
+        update_data["telephone"]     = data["telephone"]
+    if "groupe_sanguin" in data:
+        update_data["groupe_sanguin"]= data["groupe_sanguin"]
+    if "poids"          in data:
+        update_data["poids"]         = data["poids"]
+    if "taille"         in data:
+        update_data["taille"]        = data["taille"]
 
     if not update_data:
         raise HTTPException(
@@ -181,6 +239,8 @@ async def update_patient(
     )
 
     return {"message": "Profil mis à jour avec succès"}
+
+
 # ── Mise à jour disponibilité médecin ────────────
 @router.put("/update/medecin/disponibilite/{medecin_id}")
 async def update_disponibilite(
@@ -203,26 +263,25 @@ async def update_disponibilite(
         }
     except Exception as e:
         return {"success": False, "message": str(e)}
-    # ── Historique 7 jours ────────────────────────────
+
+
+# ── Historique 7 jours ────────────────────────────
 @router.get("/history/{patient_id}")
 async def get_history(patient_id: str):
     from bson import ObjectId
     from app.database import db
 
-    # 7 derniers jours
-    today     = datetime.utcnow().replace(
-                  hour=0, minute=0, second=0, microsecond=0)
-    week_ago  = today - timedelta(days=6)
+    today    = datetime.utcnow().replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    week_ago = today - timedelta(days=6)
 
-    # Récupérer toutes les fenêtres HRV des 7 derniers jours
     cursor = db.hrv_windows.find({
-        "patient_id" : patient_id,
-        "timestamp"  : {"$gte": week_ago}
+        "patient_id": patient_id,
+        "timestamp" : {"$gte": week_ago}
     }).sort("timestamp", 1)
 
     windows = await cursor.to_list(length=1000)
 
-    # Organiser par jour
     days_data = {}
     for w in windows:
         day_key = w["timestamp"].strftime("%Y-%m-%d")
@@ -230,25 +289,25 @@ async def get_history(patient_id: str):
             days_data[day_key] = []
 
         days_data[day_key].append({
-    "minute"    : w.get("minute", 0),
-    "timestamp" : w["timestamp"].strftime("%H:%M"),
-    "bpm"       : w.get("mean_bpm", 0),
-    "spo2"      : w.get("spo2", 0),
-    "label"     : w.get("label", 0),
-    "status"    : w.get("status", "Normal"),
-    "sdnn"      : w.get("sdnn", 0),
-    "rmssd"     : w.get("rmssd", 0),
-    "pnn50"     : w.get("pnn50", 0),
-    "entropy"   : w.get("entropy", 0),
-})
-    # Construire les 7 jours
+            "minute"   : w.get("minute",   0),
+            "timestamp": w["timestamp"].strftime(
+                "%H:%M"),
+            "bpm"      : w.get("mean_bpm", 0),
+            "spo2"     : w.get("spo2",     0),
+            "label"    : w.get("label",    0),
+            "status"   : w.get("status",   "Normal"),
+            "sdnn"     : w.get("sdnn",     0),
+            "rmssd"    : w.get("rmssd",    0),
+            "pnn50"    : w.get("pnn50",    0),
+            "entropy"  : w.get("entropy",  0),
+        })
+
     result = []
     for i in range(7):
-        day       = week_ago + timedelta(days=i)
-        day_key   = day.strftime("%Y-%m-%d")
-        sessions  = days_data.get(day_key, [])
+        day      = week_ago + timedelta(days=i)
+        day_key  = day.strftime("%Y-%m-%d")
+        sessions = days_data.get(day_key, [])
 
-        # Statut du jour
         if not sessions:
             day_status = "empty"
         elif any(s["label"] == 1 for s in sessions):
@@ -265,22 +324,22 @@ async def get_history(patient_id: str):
         })
 
     return result
-    # ── Alertes patient ───────────────────────────────
+
+
+# ── Alertes patient ───────────────────────────────
 @router.get("/alerts/{patient_id}")
 async def get_alerts(patient_id: str):
     from app.database import db
 
-    # Récupérer directement les FA depuis hrv_windows
     cursor = db.hrv_windows.find({
-        "patient_id" : patient_id,
-        "label"      : 1  # 1 = FA détectée
+        "patient_id": patient_id,
+        "label"     : 1
     }).sort("timestamp", -1)
 
     windows = await cursor.to_list(length=100)
 
     result = []
     for w in windows:
-        # Chercher message médecin si existe
         message = await db.messages_medecin.find_one({
             "window_id": str(w["_id"])
         })
@@ -288,26 +347,25 @@ async def get_alerts(patient_id: str):
         result.append({
             "id"               : str(w["_id"]),
             "bpm"              : w.get("mean_bpm", 0),
-            "minute"           : w.get("minute", 0),
+            "minute"           : w.get("minute",   0),
             "timestamp"        : w["timestamp"].strftime(
-                                   "%d/%m/%Y à %H:%M"
-                                 ) if "timestamp" in w else "",
+                "%d/%m/%Y à %H:%M"
+            ) if "timestamp" in w else "",
             "message_medecin"  : message["contenu"]
-                                 if message else None,
-            "timestamp_message": message["timestamp"].strftime(
-                                   "%d/%m/%Y à %H:%M"
-                                 ) if message else None,
+                if message else None,
+            "timestamp_message": message["timestamp"]
+                .strftime("%d/%m/%Y à %H:%M")
+                if message else None,
         })
 
     return result
 
 
-    # ── Liste patients du médecin ─────────────────────
+# ── Liste patients du médecin ─────────────────────
 @router.get("/medecin/patients/{medecin_id}")
 async def get_patients(medecin_id: str):
     from app.database import db
 
-    # Trouver le médecin
     medecin = await medecins_collection.find_one(
         {"identifiant": medecin_id}
     )
@@ -317,7 +375,6 @@ async def get_patients(medecin_id: str):
             detail="Médecin introuvable"
         )
 
-    # Trouver tous les patients de ce médecin
     cursor = patients_collection.find({
         "medecin_id": str(medecin["_id"])
     })
@@ -325,15 +382,12 @@ async def get_patients(medecin_id: str):
 
     result = []
     for p in patients:
-        # Dernière session
         last_window = await db.hrv_windows.find_one(
             {"patient_id": str(p["_id"])},
             sort=[("timestamp", -1)]
         )
 
-        # Vérifier FA aujourd'hui
-        from datetime import datetime, timedelta
-        today = datetime.utcnow().replace(
+        today    = datetime.utcnow().replace(
             hour=0, minute=0, second=0, microsecond=0
         )
         fa_today = await db.hrv_windows.find_one({
@@ -344,20 +398,20 @@ async def get_patients(medecin_id: str):
 
         result.append({
             "id"            : str(p["_id"]),
-            "nom"           : p.get("nom", ""),
-            "age"           : p.get("age", 0),
-            "email"         : p.get("email", ""),
+            "nom"           : p.get("nom",           ""),
+            "age"           : p.get("age",            0),
+            "email"         : p.get("email",          ""),
             "groupe_sanguin": p.get("groupe_sanguin", ""),
-            "poids"         : p.get("poids", ""),
-            "taille"        : p.get("taille", ""),
+            "poids"         : p.get("poids",          ""),
+            "taille"        : p.get("taille",         ""),
             "has_fa_today"  : fa_today is not None,
-            "last_bpm"      : last_window.get("mean_bpm", 0)
-                              if last_window else None,
-            "last_spo2"     : last_window.get("spo2", 0)
-                              if last_window else None,
-            "last_session"  : last_window["timestamp"].strftime(
-                                "%d/%m/%Y à %H:%M"
-                              ) if last_window else None,
+            "last_bpm"      : last_window.get(
+                "mean_bpm", 0) if last_window else None,
+            "last_spo2"     : last_window.get(
+                "spo2", 0) if last_window else None,
+            "last_session"  : last_window["timestamp"]
+                .strftime("%d/%m/%Y à %H:%M")
+                if last_window else None,
         })
 
     return result
@@ -368,7 +422,6 @@ async def get_patients(medecin_id: str):
 async def get_medecin_alerts(medecin_id: str):
     from app.database import db
 
-    # Trouver le médecin
     medecin = await medecins_collection.find_one(
         {"identifiant": medecin_id}
     )
@@ -378,15 +431,15 @@ async def get_medecin_alerts(medecin_id: str):
             detail="Médecin introuvable"
         )
 
-    # Trouver tous les patients
-    cursor  = patients_collection.find({
+    cursor = patients_collection.find({
         "medecin_id": str(medecin["_id"])
     })
-    patients = await cursor.to_list(length=100)
+    patients    = await cursor.to_list(length=100)
     patient_ids = [str(p["_id"]) for p in patients]
-    patient_map = {str(p["_id"]): p["nom"] for p in patients}
+    patient_map = {
+        str(p["_id"]): p["nom"] for p in patients
+    }
 
-    # Trouver toutes les FA
     cursor = db.hrv_windows.find({
         "patient_id": {"$in": patient_ids},
         "label"     : 1
@@ -395,24 +448,22 @@ async def get_medecin_alerts(medecin_id: str):
 
     result = []
     for w in windows:
-        # Message médecin
         message = await db.messages_medecin.find_one({
             "window_id": str(w["_id"])
         })
         result.append({
-            "id"               : str(w["_id"]),
-            "patient_id"       : w["patient_id"],
-            "patient_nom"      : patient_map.get(
-                                   w["patient_id"], "Inconnu"
-                                 ),
-            "bpm"              : w.get("mean_bpm", 0),
-            "minute"           : w.get("minute", 0),
-            "timestamp"        : w["timestamp"].strftime(
-                                   "%d/%m/%Y à %H:%M"
-                                 ) if "timestamp" in w else "",
-            "traitee"          : message is not None,
-            "message_envoye"   : message["contenu"]
-                                 if message else None,
+            "id"            : str(w["_id"]),
+            "patient_id"    : w["patient_id"],
+            "patient_nom"   : patient_map.get(
+                w["patient_id"], "Inconnu"),
+            "bpm"           : w.get("mean_bpm", 0),
+            "minute"        : w.get("minute",   0),
+            "timestamp"     : w["timestamp"].strftime(
+                "%d/%m/%Y à %H:%M"
+            ) if "timestamp" in w else "",
+            "traitee"       : message is not None,
+            "message_envoye": message["contenu"]
+                if message else None,
         })
 
     return result
@@ -422,16 +473,15 @@ async def get_medecin_alerts(medecin_id: str):
 @router.post("/medecin/message")
 async def send_message(data: dict):
     from app.database import db
-    from datetime import datetime
 
     message = {
-        "window_id"  : data.get("window_id"),
-        "patient_id" : data.get("patient_id"),
-        "medecin_id" : data.get("medecin_id"),
-        "contenu"    : data.get("contenu"),
-        "couleur"    : data.get("couleur", "vert"),
-        "timestamp"  : datetime.utcnow(),
-        "lu_patient" : False
+        "window_id" : data.get("window_id"),
+        "patient_id": data.get("patient_id"),
+        "medecin_id": data.get("medecin_id"),
+        "contenu"   : data.get("contenu"),
+        "couleur"   : data.get("couleur", "vert"),
+        "timestamp" : datetime.utcnow(),
+        "lu_patient": False
     }
     await db.messages_medecin.insert_one(message)
     return {"message": "Message envoyé avec succès"}
@@ -444,9 +494,12 @@ async def debug_login():
         {"identifiant": "MED-2026-4IWRX5"}
     )
     return {
-        "disponibilite": dict(medecin.get("disponibilite", {})),
+        "disponibilite": dict(
+            medecin.get("disponibilite", {})),
         "has_dispo"    : "disponibilite" in medecin
     }
+
+
 # ── Profil médecin ────────────────────────────────
 @router.get("/medecin/profil/{identifiant}")
 async def get_medecin_profil(identifiant: str):
@@ -466,35 +519,12 @@ async def get_medecin_profil(identifiant: str):
         "specialite"   : medecin["specialite"],
         "telephone"    : medecin["telephone"],
         "identifiant"  : medecin["identifiant"],
-        "disponibilite": medecin.get("disponibilite", {}),
+        "disponibilite": medecin.get(
+            "disponibilite", {}),
     }
 
-import secrets
-import os
-from datetime  import datetime, timedelta
-from fastapi   import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
 
-# ── Stockage temporaire tokens reset ─────────────
-reset_tokens: dict = {}
-
-# ── Config email ──────────────────────────────────
-from fastapi_mail import (
-    FastMail, MessageSchema, ConnectionConfig
-)
-
-conf = ConnectionConfig(
-    MAIL_USERNAME   = os.getenv("MAIL_USERNAME"),
-    MAIL_PASSWORD   = os.getenv("MAIL_PASSWORD"),
-    MAIL_FROM       = os.getenv("MAIL_FROM"),
-    MAIL_PORT       = 587,
-    MAIL_SERVER     = "smtp.gmail.com",
-    MAIL_STARTTLS   = True,
-    MAIL_SSL_TLS    = False,
-    USE_CREDENTIALS = True,
-)
-
-# ── Endpoint 1 : Demander reset ───────────────────
+# ── Mot de passe oublié ───────────────────────────
 @router.post("/forgot-password")
 async def forgot_password(data: dict):
     email = data.get("email", "").strip().lower()
@@ -505,14 +535,14 @@ async def forgot_password(data: dict):
             detail="Email requis"
         )
 
-    patient = await db.patients.find_one(
+    # ✅ FIX : utiliser collections correctes
+    patient = await patients_collection.find_one(
         {"email": email}
     )
-    medecin = await db.medecins.find_one(
+    medecin = await medecins_collection.find_one(
         {"email": email}
     )
 
-    # Sécurité : même réponse si email existe ou non
     if not patient and not medecin:
         return {
             "success": True,
@@ -573,7 +603,7 @@ async def forgot_password(data: dict):
 </body>
 </html>
             """,
-            subtype = "html",
+            subtype="html",
         )
         fm = FastMail(conf)
         await fm.send_message(message)
@@ -581,7 +611,7 @@ async def forgot_password(data: dict):
         print(f"Erreur email : {e}")
         raise HTTPException(
             status_code=500,
-            detail="Erreur envoi email"
+            detail=f"Erreur envoi email : {str(e)}"
         )
 
     return {
@@ -590,7 +620,8 @@ async def forgot_password(data: dict):
                    "un lien a été envoyé."
     }
 
-# ── Endpoint 2 : Page HTML reset ─────────────────
+
+# ── Page HTML reset ───────────────────────────────
 @router.get("/reset-password-page")
 async def reset_password_page(token: str):
     return HTMLResponse(content=f"""
@@ -626,7 +657,8 @@ async def reset_password_page(token: str):
             border:none;border-radius:8px;
             font-size:16px;font-weight:bold;
             cursor:pointer}}
-    button:disabled{{background:#aaa;cursor:not-allowed}}
+    button:disabled{{background:#aaa;
+                     cursor:not-allowed}}
     .msg{{margin-top:16px;padding:12px 16px;
           border-radius:8px;font-size:14px;
           display:none}}
@@ -659,11 +691,11 @@ async def reset_password_page(token: str):
     document.getElementById('form')
       .addEventListener('submit', async (e) => {{
         e.preventDefault();
-        const p1  = document.getElementById('pwd1').value;
-        const p2  = document.getElementById('pwd2').value;
-        const btn = document.getElementById('btn');
-        const msg = document.getElementById('msg');
-        if (p1 !== p2) {{
+        const p1=document.getElementById('pwd1').value;
+        const p2=document.getElementById('pwd2').value;
+        const btn=document.getElementById('btn');
+        const msg=document.getElementById('msg');
+        if(p1!==p2){{
           msg.className='msg error';
           msg.style.display='block';
           msg.textContent=
@@ -672,19 +704,20 @@ async def reset_password_page(token: str):
         }}
         btn.disabled=true;
         btn.textContent='Envoi...';
-        try {{
-          const res = await fetch(
+        try{{
+          const res=await fetch(
             '/api/auth/reset-password',
             {{
               method:'POST',
-              headers:{{'Content-Type':'application/json'}},
+              headers:{{'Content-Type':
+                'application/json'}},
               body:JSON.stringify({{
                 token:'{token}',password:p1
               }})
             }}
           );
-          const data = await res.json();
-          if (data.success) {{
+          const data=await res.json();
+          if(data.success){{
             msg.className='msg success';
             msg.style.display='block';
             msg.textContent=
@@ -692,7 +725,7 @@ async def reset_password_page(token: str):
               'Retournez à l\'application.';
             document.getElementById('form')
               .style.display='none';
-          }} else {{
+          }}else{{
             msg.className='msg error';
             msg.style.display='block';
             msg.textContent=
@@ -700,7 +733,7 @@ async def reset_password_page(token: str):
             btn.disabled=false;
             btn.textContent='Réinitialiser';
           }}
-        }} catch(err) {{
+        }}catch(err){{
           msg.className='msg error';
           msg.style.display='block';
           msg.textContent='Erreur réseau.';
@@ -713,7 +746,8 @@ async def reset_password_page(token: str):
 </html>
     """)
 
-# ── Endpoint 3 : Traiter reset ────────────────────
+
+# ── Traiter reset ─────────────────────────────────
 @router.post("/reset-password")
 async def reset_password(data: dict):
     token    = data.get("token",    "")
@@ -752,10 +786,11 @@ async def reset_password(data: dict):
     )
     hashed = pwd_context.hash(password)
 
+    # ✅ FIX : utiliser collections correctes
     collection = (
-        db.patients
+        patients_collection
         if token_data["role"] == "patient"
-        else db.medecins
+        else medecins_collection
     )
     await collection.update_one(
         {"email": token_data["email"]},
