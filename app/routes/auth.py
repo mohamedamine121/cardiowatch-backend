@@ -905,3 +905,81 @@ async def reset_password(data: dict):
         "success": True,
         "message": "Mot de passe réinitialisé !"
     }
+# ── Ajouter fichier dossier médical ──────────────
+@router.post("/patient/{patient_id}/dossier")
+async def add_dossier_file(
+    patient_id: str,
+    data      : dict
+):
+    from bson     import ObjectId
+    from datetime import datetime
+
+    fichier = {
+        "id"        : data.get("id"),
+        "nom"       : data.get("nom"),
+        "type"      : data.get("type"),
+        "url"       : data.get("url"),
+        "public_id" : data.get("public_id"),
+        "taille"    : data.get("taille"),
+        "date_ajout": datetime.utcnow().strftime(
+            "%d/%m/%Y à %H:%M"
+        ),
+    }
+
+    await patients_collection.update_one(
+        {"_id": ObjectId(patient_id)},
+        {"$push": {"dossier_medical": fichier}}
+    )
+
+    return {
+        "success": True,
+        "message": "Fichier ajouté au dossier",
+        "fichier": fichier,
+    }
+
+
+# ── Récupérer dossier médical ─────────────────────
+@router.get("/patient/{patient_id}/dossier")
+async def get_dossier(patient_id: str):
+    from bson import ObjectId
+
+    patient = await patients_collection.find_one(
+        {"_id": ObjectId(patient_id)}
+    )
+
+    if not patient:
+        raise HTTPException(
+            status_code=404,
+            detail="Patient introuvable"
+        )
+
+    dossier = patient.get("dossier_medical", [])
+
+    return {
+        "success": True,
+        "dossier": dossier,
+        "total"  : len(dossier),
+    }
+
+
+# ── Supprimer fichier dossier médical ─────────────
+@router.delete(
+    "/patient/{patient_id}/dossier/{fichier_id}"
+)
+async def delete_dossier_file(
+    patient_id: str,
+    fichier_id: str
+):
+    from bson import ObjectId
+
+    await patients_collection.update_one(
+        {"_id": ObjectId(patient_id)},
+        {"$pull": {
+            "dossier_medical": {"id": fichier_id}
+        }}
+    )
+
+    return {
+        "success": True,
+        "message": "Fichier supprimé",
+    }
