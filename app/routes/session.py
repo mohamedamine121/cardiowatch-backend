@@ -1,6 +1,7 @@
 # ============================================================
-# app/routes/session.py - STEP 1
-# Pipeline HRV complet (SANS MongoDB, SANS IA pour l'instant)
+# app/routes/session.py - PIPELINE HRV COMPLET
+# Modifié pour accepter 1500+ échantillons (60s @ 25Hz)
+# Validation scientifique : PMC6953345, PMC4309304
 # ============================================================
  
 from fastapi import APIRouter, HTTPException
@@ -21,7 +22,7 @@ router = APIRouter()
  
 class SessionData(BaseModel):
     patient_id: str
-    ppg_values: List[float]  # 6000 valeurs IR
+    ppg_values: List[float]  # Signal PPG IR (1500+ échantillons)
     timestamps_us: List[int] = []  # Timestamps microsecondes (optionnel)
     spo2: int
     timestamp: str = ""
@@ -45,11 +46,15 @@ def validate_signal(signal: np.ndarray) -> None:
     """
     Valide le signal PPG avant traitement
     """
-    # Longueur minimale (54s minimum)
-    if len(signal) < 5400:
+    # ✅ Longueur minimale : 1500 échantillons (60s à 25Hz)
+    # Validation scientifique :
+    # - PMC6953345 : 60s validé pour HRV court terme et détection FA
+    # - PMC4309304 : PPG 25Hz corrélation acceptable avec ECG (r=0.7-0.78)
+    # - pNN50 nécessite minimum 60s (standard HRV)
+    if len(signal) < 1500:
         raise HTTPException(
             status_code=400,
-            detail=f"Signal trop court : {len(signal)} échantillons (min 5400)"
+            detail=f"Signal trop court : {len(signal)} échantillons (min 1500 pour 60s @ 25Hz)"
         )
     
     # Pas de NaN
@@ -79,6 +84,7 @@ def validate_signal(signal: np.ndarray) -> None:
 def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> float:
     """
     Calcule la fréquence d'échantillonnage réelle
+    Support : 25Hz (avg=4) ou 100Hz (avg=1)
     """
     if timestamps_us and len(timestamps_us) >= 2:
         # Méthode 1 : Depuis timestamps microsecondes
@@ -93,13 +99,13 @@ def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> fl
         duration_s = 60.0
         fs_real = len(signal) / duration_s
         
-        logger.info(f"FS estimée depuis longueur : {fs_real:.2f} Hz")
+        logger.info(f"FS estimée depuis longueur : {fs_real:.2f} Hz (assumant 60s)")
     
-    # Validation range
-    if not (50 <= fs_real <= 150):
+    # Validation range élargie pour supporter 25Hz et 100Hz
+    if not (20 <= fs_real <= 150):
         raise HTTPException(
             status_code=400,
-            detail=f"Fréquence anormale : {fs_real:.2f} Hz (attendu 50-150 Hz)"
+            detail=f"Fréquence anormale : {fs_real:.2f} Hz (attendu 20-150 Hz)"
         )
     
     return fs_real
@@ -111,6 +117,11 @@ def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> fl
 def resample_to_125hz(signal: np.ndarray, fs_original: float) -> np.ndarray:
     """
     Re-échantillonne le signal à 125 Hz (compatibilité MIMIC)
+    Adaptatif : fonctionne avec 25Hz (1500 pts) ou 100Hz (6000 pts)
+    
+    Exemples :
+    - 1500 pts @ 25Hz  → 7500 pts @ 125Hz (×5)
+    - 6000 pts @ 100Hz → 7500 pts @ 125Hz (×1.25)
     """
     from scipy.signal import resample
     
@@ -119,12 +130,12 @@ def resample_to_125hz(signal: np.ndarray, fs_original: float) -> np.ndarray:
     
     signal_125hz = resample(signal, n_target)
     
-    logger.info(f"Re-sampling : {n_original} → {n_target} pts ({fs_original:.1f} → 125 Hz)")
+    logger.info(f"Re-sampling : {n_original} pts @ {fs_original:.1f}Hz → {n_target} pts @ 125Hz")
     
     # Validation longueur cible (~7500 pour 60s)
     expected = 125 * 60
     if abs(len(signal_125hz) - expected) > 200:
-        logger.warning(f"Longueur anormale après resample : {len(signal_125hz)} (attendu ~{expected})")
+        logger.warning(f"Longueur après resample : {len(signal_125hz)} (attendu ~{expected})")
     
     return signal_125hz
  
@@ -311,8 +322,13 @@ def calculate_hrv_features(ibi_clean: np.ndarray) -> dict:
 @router.post("/analyze", response_model=HRVResponse)
 async def analyze_session(data: SessionData):
     """
-    STEP 1 : Pipeline HRV complet
-    (PAS de normalisation, PAS de XGBoost, PAS de MongoDB)
+    Pipeline HRV complet avec détection FA
+    Support : 1500+ échantillons (25Hz ou 100Hz)
+    
+    Modifications STEP 2 :
+    - Accepte 1500+ échantillons (au lieu de 5400+)
+    - Signal lissé matériellement (sampleAverage=4)
+    - Validé scientifiquement pour 60s @ 25Hz
     """
     
     logger.info(f"========================================")
