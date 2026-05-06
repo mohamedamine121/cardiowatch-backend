@@ -240,9 +240,9 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
     """
     Filtrage double :
     1. Physiologique : 400-1500 ms
-    2. Malik : ±20% médiane
+    2. Malik : ±30% médiane (relâché pour signal PPG réel)
     
-    IDENTIQUE au code training MIMIC
+    MODIFIÉ pour production ESP32
     """
     from hrvanalysis import remove_outliers, remove_ectopic_beats
     
@@ -253,11 +253,16 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
         high_rri=1500  # Production : 1500 ms (40 BPM)
     )
     
-    # Filtre Malik
+    logger.info(f"📊 Après filtre physio : {len(ibi_ms)} → {len(ibi_clean)} IBI")
+    
+    # Filtre Malik RELÂCHÉ (30% au lieu de 20%)
     ibi_clean = remove_ectopic_beats(
         rr_intervals=ibi_clean,
-        method="malik"
+        method="malik",
+        custom_removing_rule=0.30  # ✅ 30% tolérance
     )
+    
+    logger.info(f"📊 Après filtre Malik : {len(ibi_clean)} IBI restants")
     
     # Convertir en array numpy
     ibi_clean = np.array(ibi_clean, dtype=np.float64)
@@ -269,11 +274,11 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
             detail="IBI contient NaN après filtrage outliers"
         )
     
-    # Minimum 30 IBI valides
-    if len(ibi_clean) < 30:
+    # Minimum 20 IBI valides (au lieu de 30 pour signal PPG réel)
+    if len(ibi_clean) < 20:
         raise HTTPException(
             status_code=422,
-            detail=f"Trop peu d'IBI valides : {len(ibi_clean)} (min 30)"
+            detail=f"Trop peu d'IBI valides : {len(ibi_clean)} (min 20)"
         )
     
     logger.info(f"✅ Outliers filtrés : {len(ibi_ms)} → {len(ibi_clean)} IBI")
