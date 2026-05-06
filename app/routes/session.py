@@ -238,9 +238,14 @@ def calculate_ibi(working_data, fs: float = 125) -> np.ndarray:
  
 def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
     """
-    Filtrage double :
+    Filtrage adapté signal PPG ESP32 :
     1. Physiologique : 400-1500 ms
-    2. Malik : ±30% médiane (relâché pour signal PPG réel)
+    2. Malik TRÈS RELÂCHÉ : ±50% médiane (vs 20% ECG standard)
+    
+    Justification scientifique :
+    - PPG variabilité naturelle > ECG (PMC4309304: r=0.7-0.8)
+    - Filtre trop strict rejette battements valides
+    - 50% = compromis entre robustesse et précision
     
     MODIFIÉ pour production ESP32
     """
@@ -255,14 +260,17 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
     
     logger.info(f"📊 Après filtre physio : {len(ibi_ms)} → {len(ibi_clean)} IBI")
     
-    # Filtre Malik RELÂCHÉ (30% au lieu de 20%)
-    ibi_clean = remove_ectopic_beats(
-        rr_intervals=ibi_clean,
-        method="malik",
-        custom_removing_rule=0.30  # ✅ 30% tolérance
-    )
-    
-    logger.info(f"📊 Après filtre Malik : {len(ibi_clean)} IBI restants")
+    # Filtre Malik TRÈS RELÂCHÉ pour PPG
+    try:
+        ibi_clean = remove_ectopic_beats(
+            rr_intervals=ibi_clean,
+            method="malik",
+            custom_removing_rule=0.50  # ✅ 50% tolérance PPG
+        )
+        logger.info(f"📊 Après filtre Malik 50% : {len(ibi_clean)} IBI")
+    except Exception as e:
+        # Si Malik échoue, garder filtre physio seulement
+        logger.warning(f"⚠️ Malik échoué, filtre physio seul : {e}")
     
     # Convertir en array numpy
     ibi_clean = np.array(ibi_clean, dtype=np.float64)
