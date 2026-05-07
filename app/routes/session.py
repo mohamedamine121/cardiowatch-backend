@@ -178,34 +178,45 @@ def filter_butterworth(signal: np.ndarray, fs: float = 125) -> np.ndarray:
  
 def detect_peaks_heartpy(signal: np.ndarray, fs: float = 125):
     """
-    Détection pics avec HeartPy
-    IDENTIQUE au code training MIMIC
+    Détection pics avec HeartPy - ADAPTÉ SIGNAL PPG
+    Contraintes relâchées pour signal bruité ESP32
     """
     import heartpy as hp
     
     try:
+        # ✅ Paramètres adaptés PPG bruité
         working_data, measures = hp.process(
             signal,
             sample_rate=fs,
-            high_precision=True,
+            bpmmin=30,           # ✅ Élargi : 30 au lieu de 40
+            bpmmax=180,          # ✅ Élargi : 180 au lieu de 150
+            high_precision=False, # ✅ Désactivé pour signal bruité
             clean_rr=True,
-            clean_rr_method='iqr'
+            clean_rr_method='iqr',
+            reject_segmentwise=False  # ✅ Ne pas rejeter segments
         )
+        
+        logger.info(f"✅ HeartPy OK : {len(working_data['peaklist'])} pics détectés")
+        
     except Exception as e:
+        # ✅ Log détaillé pour debug
+        logger.error(f"❌ HeartPy échoué : {str(e)}")
+        logger.error(f"   Signal stats : min={np.min(signal):.1f}, max={np.max(signal):.1f}, mean={np.mean(signal):.1f}")
+        
         raise HTTPException(
             status_code=422,
             detail=f"HeartPy détection échouée : {str(e)}"
         )
     
-    # Validation BPM
+    # Validation BPM ÉLARGIE
     bpm = float(measures['bpm'])
-    if not (40 <= bpm <= 150):
+    if not (30 <= bpm <= 180):  # ✅ Range élargi
         raise HTTPException(
             status_code=422,
-            detail=f"BPM hors range physiologique : {bpm:.1f} (attendu 40-150)"
+            detail=f"BPM hors range : {bpm:.1f} (attendu 30-180)"
         )
     
-    logger.info(f"✅ HeartPy : BPM={bpm:.1f}, Pics détectés={len(working_data['peaklist'])}")
+    logger.info(f"✅ HeartPy : BPM={bpm:.1f}")
     
     return working_data, measures
  
@@ -364,8 +375,20 @@ async def analyze_session(data: SessionData):
         # ── ÉTAPE 4 : Filtrage Butterworth ────────────────
         signal_filtered = filter_butterworth(signal_125hz, fs=125)
         
+        # ── ÉTAPE 4.5 : Normalisation pour HeartPy ────────
+        # HeartPy fonctionne mieux avec signal normalisé
+        signal_mean = np.mean(signal_filtered)
+        signal_std = np.std(signal_filtered)
+        
+        if signal_std > 0:
+            signal_normalized = (signal_filtered - signal_mean) / signal_std
+            logger.info(f"📊 Signal normalisé : mean=0, std=1")
+        else:
+            signal_normalized = signal_filtered
+            logger.warning(f"⚠️ Signal std=0, normalisation ignorée")
+        
         # ── ÉTAPE 5 : Détection pics HeartPy ──────────────
-        working_data, measures = detect_peaks_heartpy(signal_filtered, fs=125)
+        working_data, measures = detect_peaks_heartpy(signal_normalized, fs=125)
         
         # ── ÉTAPE 6 : Calcul IBI ──────────────────────────
         ibi_ms = calculate_ibi(working_data, fs=125)
