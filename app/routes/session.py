@@ -436,6 +436,9 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
         high_rri=1500  # Production : 1500 ms (40 BPM)
     )
     
+    # ✅ CORRECTION : Supprimer les NaN introduits par remove_outliers
+    ibi_clean = [x for x in ibi_clean if not np.isnan(x)]
+    
     n_after_physio = len(ibi_clean)
     logger.info(f"📊 Filtre physiologique : {n_initial} → {n_after_physio} IBI")
     
@@ -450,23 +453,23 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
             custom_removing_rule=0.50  # ✅ 50% tolérance PPG
         )
         
-        logger.info(f"🔍 DEBUG : APRÈS Malik - Type: {type(ibi_malik)}, Valeur: {ibi_malik}")
-        logger.info(f"🔍 DEBUG : APRÈS Malik - Est None? {ibi_malik is None}")
-        logger.info(f"🔍 DEBUG : APRÈS Malik - Est liste vide? {len(ibi_malik) == 0 if ibi_malik is not None else 'N/A'}")
+        logger.info(f"🔍 DEBUG : APRÈS Malik (AVANT nettoyage NaN) - Type: {type(ibi_malik)}, Len: {len(ibi_malik) if ibi_malik else 0}")
         
         if ibi_malik is None:
             logger.error(f"❌ ERREUR : remove_ectopic_beats a retourné None !")
             ibi_malik = ibi_clean  # Garder filtre physio
         
+        # ✅ CORRECTION : Supprimer les NaN introduits par Malik
         if isinstance(ibi_malik, list):
+            ibi_malik = [x for x in ibi_malik if not np.isnan(x)]
             n_after_malik = len(ibi_malik)
             logger.info(f"📊 Filtre Malik 50%     : {n_after_physio} → {n_after_malik} IBI")
             
             if n_after_malik == 0:
-                logger.error(f"❌ ERREUR : Malik a retourné une liste vide !")
+                logger.error(f"❌ ERREUR : Malik a retourné une liste vide après nettoyage NaN !")
                 ibi_malik = ibi_clean  # Garder filtre physio
             
-            logger.info(f"🔍 DEBUG : APRÈS Malik - Premiers IBI: {ibi_malik[:5] if len(ibi_malik) >= 5 else ibi_malik}")
+            logger.info(f"🔍 DEBUG : APRÈS Malik (APRÈS nettoyage NaN) - Premiers IBI: {ibi_malik[:5] if len(ibi_malik) >= 5 else ibi_malik}")
         else:
             logger.error(f"❌ ERREUR : Type inattendu après Malik: {type(ibi_malik)}")
             ibi_malik = ibi_clean
