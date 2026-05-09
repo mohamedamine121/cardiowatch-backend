@@ -441,19 +441,50 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
     
     # Filtre Malik TRÈS RELÂCHÉ pour PPG
     try:
-        ibi_clean = remove_ectopic_beats(
+        logger.info(f"🔍 DEBUG : AVANT Malik - Type: {type(ibi_clean)}, Len: {len(ibi_clean)}")
+        logger.info(f"🔍 DEBUG : AVANT Malik - Premiers IBI: {ibi_clean[:5] if len(ibi_clean) >= 5 else ibi_clean}")
+        
+        ibi_malik = remove_ectopic_beats(
             rr_intervals=ibi_clean,
             method="malik",
             custom_removing_rule=0.50  # ✅ 50% tolérance PPG
         )
-        n_after_malik = len(ibi_clean)
-        logger.info(f"📊 Filtre Malik 50%     : {n_after_physio} → {n_after_malik} IBI")
+        
+        logger.info(f"🔍 DEBUG : APRÈS Malik - Type: {type(ibi_malik)}, Valeur: {ibi_malik}")
+        logger.info(f"🔍 DEBUG : APRÈS Malik - Est None? {ibi_malik is None}")
+        logger.info(f"🔍 DEBUG : APRÈS Malik - Est liste vide? {len(ibi_malik) == 0 if ibi_malik is not None else 'N/A'}")
+        
+        if ibi_malik is None:
+            logger.error(f"❌ ERREUR : remove_ectopic_beats a retourné None !")
+            ibi_malik = ibi_clean  # Garder filtre physio
+        
+        if isinstance(ibi_malik, list):
+            n_after_malik = len(ibi_malik)
+            logger.info(f"📊 Filtre Malik 50%     : {n_after_physio} → {n_after_malik} IBI")
+            
+            if n_after_malik == 0:
+                logger.error(f"❌ ERREUR : Malik a retourné une liste vide !")
+                ibi_malik = ibi_clean  # Garder filtre physio
+            
+            logger.info(f"🔍 DEBUG : APRÈS Malik - Premiers IBI: {ibi_malik[:5] if len(ibi_malik) >= 5 else ibi_malik}")
+        else:
+            logger.error(f"❌ ERREUR : Type inattendu après Malik: {type(ibi_malik)}")
+            ibi_malik = ibi_clean
+        
+        ibi_clean = ibi_malik
+        
     except Exception as e:
         # Si Malik échoue, garder filtre physio seulement
-        logger.warning(f"⚠️ Malik échoué, filtre physio seul utilisé : {e}")
+        logger.error(f"❌ EXCEPTION Malik : {e}")
+        logger.error(f"🔍 DEBUG : Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"🔍 DEBUG : Traceback:\n{traceback.format_exc()}")
+        logger.warning(f"⚠️ Malik échoué, filtre physio seul utilisé")
     
     # Convertir en array numpy
+    logger.info(f"🔍 DEBUG : AVANT conversion numpy - Type: {type(ibi_clean)}, Len: {len(ibi_clean) if hasattr(ibi_clean, '__len__') else 'N/A'}")
     ibi_clean = np.array(ibi_clean, dtype=np.float64)
+    logger.info(f"🔍 DEBUG : APRÈS conversion numpy - Shape: {ibi_clean.shape}, Len: {len(ibi_clean)}")
     
     # Vérifier pas de NaN
     if np.any(np.isnan(ibi_clean)):
