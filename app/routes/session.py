@@ -1,23 +1,64 @@
 # ============================================================
-# app/routes/session.py - PIPELINE HRV COMPLET
+# app/routes/session.py - PIPELINE HRV COMPLET + IA
 # Modifié pour accepter 1500+ échantillons (60s @ 25Hz)
 # Validation scientifique : PMC6953345, PMC4309304
+# ✅ INTÉGRATION XGBoost pour détection FA
 # ============================================================
  
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import numpy as np
 import logging
- 
+import joblib
+from pathlib import Path
+
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
  
 router = APIRouter()
- 
+
 # ============================================================
-# MODÈLE DE DONNÉES
+# CHARGEMENT MODÈLES IA
+# ============================================================
+
+BASE_DIR = Path(__file__).parent.parent.parent
+MODEL_PATH = BASE_DIR / "models" / "xgboost_cardiowatch.pkl"
+SCALER_PATH = BASE_DIR / "models" / "scaler.pkl"
+
+try:
+    model_xgboost = joblib.load(MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH)
+    logger.info("=" * 60)
+    logger.info("✅ MODÈLES IA CHARGÉS AVEC SUCCÈS")
+    logger.info("=" * 60)
+    logger.info(f"📁 XGBoost : {MODEL_PATH}")
+    logger.info(f"📁 Scaler  : {SCALER_PATH}")
+    logger.info("=" * 60)
+except FileNotFoundError as e:
+    logger.error("=" * 60)
+    logger.error("❌ FICHIERS MODÈLES INTROUVABLES")
+    logger.error("=" * 60)
+    logger.error(f"Erreur: {e}")
+    logger.error(f"Chemin recherché : {MODEL_PATH}")
+    logger.error("Vérifier que /models/ contient xgboost_cardiowatch.pkl et scaler.pkl")
+    logger.error("⚠️ MODE DÉGRADÉ : Calcul HRV uniquement (pas de prédiction FA)")
+    logger.error("=" * 60)
+    model_xgboost = None
+    scaler = None
+except Exception as e:
+    logger.error("=" * 60)
+    logger.error("❌ ERREUR CHARGEMENT MODÈLES IA")
+    logger.error("=" * 60)
+    logger.error(f"Erreur: {e}")
+    logger.error("⚠️ MODE DÉGRADÉ : Calcul HRV uniquement (pas de prédiction FA)")
+    logger.error("=" * 60)
+    model_xgboost = None
+    scaler = None
+
+# ============================================================
+# MODÈLES DE DONNÉES
 # ============================================================
  
 class SessionData(BaseModel):
@@ -37,7 +78,115 @@ class HRVResponse(BaseModel):
     entropy: float
     fs_real: float
     n_samples: int
- 
+    # ✅ NOUVEAUX CHAMPS IA
+    af_detected: int                # 0=Normal, 1=FA, -1=Erreur
+    af_probability: Optional[float] # 0.0-1.0 ou null
+    af_risk: str                    # "Faible"/"Élevé"/"Erreur IA"
+    af_confidence: Optional[float]  # 0-100% ou null
+
+# ============================================================
+# FONCTION PRÉDICTION FA
+# ============================================================
+
+def predict_af(features: dict) -> dict:
+    """
+    Prédiction Fibrillation Auriculaire avec XGBoost
+    
+    Args:
+        features: dict avec Mean_BPM, SDNN, RMSSD, pNN50, Entropy
+    
+    Returns:
+        dict avec:
+        - label: 0 (Normal) | 1 (FA) | -1 (Erreur)
+        - probability: 0.0-1.0 (proba FA) ou None
+        - risk: "Faible" | "Élevé" | "Erreur IA"
+        - confidence: 0-100% ou None
+    """
+    
+    # Vérifier que modèles sont chargés
+    if model_xgboost is None or scaler is None:
+        logger.warning("⚠️ Modèles IA non disponibles - Prédiction impossible")
+        logger.warning("   Mode dégradé : Features HRV calculées sans prédiction FA")
+        return {
+            'label': -1,
+            'probability': None,
+            'risk': 'Erreur IA',
+            'confidence': None
+        }
+    
+    try:
+        logger.info("=" * 60)
+        logger.info("🔬 PRÉDICTION IA - DÉTECTION FA")
+        logger.info("=" * 60)
+        
+        # ── Préparer features dans BON ORDRE (IDENTIQUE training) ──
+        # ORDRE CRITIQUE : Mean_BPM, SDNN, RMSSD, pNN50, Entropy
+        X = np.array([[
+            features['Mean_BPM'],
+            features['SDNN'],
+            features['RMSSD'],
+            features['pNN50'],
+            features['Entropy']
+        ]])
+        
+        logger.info("📊 Features d'entrée :")
+        logger.info(f"   - Mean_BPM : {features['Mean_BPM']:.1f} BPM")
+        logger.info(f"   - SDNN     : {features['SDNN']:.1f} ms")
+        logger.info(f"   - RMSSD    : {features['RMSSD']:.1f} ms")
+        logger.info(f"   - pNN50    : {features['pNN50']:.1f} %")
+        logger.info(f"   - Entropy  : {features['Entropy']:.4f}")
+        
+        # ── Normaliser avec scaler (IDENTIQUE training) ──
+        X_scaled = scaler.transform(X)
+        logger.info("✅ Normalisation appliquée (StandardScaler)")
+        
+        # ── Prédire avec XGBoost ──
+        label = int(model_xgboost.predict(X_scaled)[0])
+        proba_array = model_xgboost.predict_proba(X_scaled)[0]
+        proba_fa = float(proba_array[1])  # Probabilité classe 1 (FA)
+        
+        logger.info("🎯 Prédiction XGBoost :")
+        logger.info(f"   - Proba Normal : {proba_array[0]:.4f}")
+        logger.info(f"   - Proba FA     : {proba_array[1]:.4f}")
+        
+        # ── Calculer risque et confiance ──
+        if label == 1:
+            # FA détectée
+            risk = 'Élevé'
+            confidence = proba_fa * 100  # Confiance = probabilité FA
+            logger.info(f"🚨 RÉSULTAT : FIBRILLATION AURICULAIRE DÉTECTÉE")
+        else:
+            # Normal
+            risk = 'Faible'
+            confidence = (1 - proba_fa) * 100  # Confiance = probabilité Normal
+            logger.info(f"✅ RÉSULTAT : RYTHME NORMAL")
+        
+        logger.info(f"   - Label    : {label} ({'FA' if label==1 else 'Normal'})")
+        logger.info(f"   - Risque   : {risk}")
+        logger.info(f"   - Confiance: {confidence:.1f}%")
+        logger.info("=" * 60)
+        
+        return {
+            'label': label,
+            'probability': round(proba_fa, 4),  # 0.0-1.0
+            'risk': risk,
+            'confidence': round(confidence, 1)
+        }
+        
+    except Exception as e:
+        logger.error("=" * 60)
+        logger.error("❌ PRÉDICTION IA ÉCHOUÉE")
+        logger.error("=" * 60)
+        logger.error(f"Erreur : {str(e)}")
+        logger.error(f"Features reçues : {features}")
+        logger.error("=" * 60)
+        return {
+            'label': -1,
+            'probability': None,
+            'risk': 'Erreur IA',
+            'confidence': None
+        }
+
 # ============================================================
 # ÉTAPE 1 : VALIDATION SIGNAL
 # ============================================================
@@ -75,7 +224,11 @@ def validate_signal(signal: np.ndarray) -> None:
             detail=f"Signal plat (range={signal_range:.0f}) - Pas de pulsation détectée"
         )
     
-    logger.info(f"✅ Validation OK : {len(signal)} pts, range={signal_range:.0f}")
+    logger.info(f"✅ Validation signal OK")
+    logger.info(f"   - Échantillons : {len(signal)}")
+    logger.info(f"   - Range        : {signal_range:.0f}")
+    logger.info(f"   - Min          : {signal_min:.0f}")
+    logger.info(f"   - Max          : {signal_max:.0f}")
  
 # ============================================================
 # ÉTAPE 2 : CALCUL FRÉQUENCE RÉELLE
@@ -93,13 +246,13 @@ def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> fl
         median_period = np.median(periods)
         fs_real = 1.0 / median_period
         
-        logger.info(f"FS calculée depuis timestamps : {fs_real:.2f} Hz")
+        logger.info(f"📊 FS calculée depuis timestamps : {fs_real:.2f} Hz")
     else:
         # Méthode 2 : Estimation depuis longueur signal (60s attendu)
         duration_s = 60.0
         fs_real = len(signal) / duration_s
         
-        logger.info(f"FS estimée depuis longueur : {fs_real:.2f} Hz (assumant 60s)")
+        logger.info(f"📊 FS estimée depuis longueur : {fs_real:.2f} Hz (assumant 60s)")
     
     # Validation range élargie pour supporter 25Hz et 100Hz
     if not (20 <= fs_real <= 150):
@@ -130,12 +283,12 @@ def resample_to_125hz(signal: np.ndarray, fs_original: float) -> np.ndarray:
     
     signal_125hz = resample(signal, n_target)
     
-    logger.info(f"Re-sampling : {n_original} pts @ {fs_original:.1f}Hz → {n_target} pts @ 125Hz")
+    logger.info(f"📊 Re-sampling : {n_original} pts @ {fs_original:.1f}Hz → {n_target} pts @ 125Hz")
     
     # Validation longueur cible (~7500 pour 60s)
     expected = 125 * 60
     if abs(len(signal_125hz) - expected) > 200:
-        logger.warning(f"Longueur après resample : {len(signal_125hz)} (attendu ~{expected})")
+        logger.warning(f"⚠️ Longueur après resample : {len(signal_125hz)} (attendu ~{expected})")
     
     return signal_125hz
  
@@ -168,7 +321,7 @@ def filter_butterworth(signal: np.ndarray, fs: float = 125) -> np.ndarray:
             detail="Filtrage Butterworth instable"
         )
     
-    logger.info(f"✅ Filtrage Butterworth OK")
+    logger.info(f"✅ Filtrage Butterworth 0.5-8 Hz appliqué")
     
     return signal_filtered
  
@@ -196,12 +349,25 @@ def detect_peaks_heartpy(signal: np.ndarray, fs: float = 125):
             reject_segmentwise=False  # ✅ Ne pas rejeter segments
         )
         
-        logger.info(f"✅ HeartPy OK : {len(working_data['peaklist'])} pics détectés")
+        bpm_detected = float(measures['bpm'])
+        n_peaks = len(working_data['peaklist'])
+        
+        logger.info(f"✅ HeartPy - Détection pics réussie")
+        logger.info(f"   - Pics détectés : {n_peaks}")
+        logger.info(f"   - BPM calculé   : {bpm_detected:.1f}")
         
     except Exception as e:
         # ✅ Log détaillé pour debug
-        logger.error(f"❌ HeartPy échoué : {str(e)}")
-        logger.error(f"   Signal stats : min={np.min(signal):.1f}, max={np.max(signal):.1f}, mean={np.mean(signal):.1f}")
+        logger.error("=" * 60)
+        logger.error("❌ HEARTPY - DÉTECTION PICS ÉCHOUÉE")
+        logger.error("=" * 60)
+        logger.error(f"Erreur : {str(e)}")
+        logger.error(f"Signal stats :")
+        logger.error(f"   - Min  : {np.min(signal):.1f}")
+        logger.error(f"   - Max  : {np.max(signal):.1f}")
+        logger.error(f"   - Mean : {np.mean(signal):.1f}")
+        logger.error(f"   - Std  : {np.std(signal):.1f}")
+        logger.error("=" * 60)
         
         raise HTTPException(
             status_code=422,
@@ -209,14 +375,11 @@ def detect_peaks_heartpy(signal: np.ndarray, fs: float = 125):
         )
     
     # Validation BPM ÉLARGIE
-    bpm = float(measures['bpm'])
-    if not (30 <= bpm <= 180):  # ✅ Range élargi
+    if not (30 <= bpm_detected <= 180):  # ✅ Range élargi
         raise HTTPException(
             status_code=422,
-            detail=f"BPM hors range : {bpm:.1f} (attendu 30-180)"
+            detail=f"BPM hors range : {bpm_detected:.1f} (attendu 30-180)"
         )
-    
-    logger.info(f"✅ HeartPy : BPM={bpm:.1f}")
     
     return working_data, measures
  
@@ -239,7 +402,9 @@ def calculate_ibi(working_data, fs: float = 125) -> np.ndarray:
     # Convertir en ms (RR_list déjà en ms normalement)
     ibi_ms = np.array(rr_list, dtype=np.float64)
     
-    logger.info(f"IBI calculés : {len(ibi_ms)} intervalles")
+    logger.info(f"📊 IBI calculés : {len(ibi_ms)} intervalles")
+    logger.info(f"   - Mean IBI : {np.mean(ibi_ms):.1f} ms")
+    logger.info(f"   - Std IBI  : {np.std(ibi_ms):.1f} ms")
     
     return ibi_ms
  
@@ -262,6 +427,8 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
     """
     from hrvanalysis import remove_outliers, remove_ectopic_beats
     
+    n_initial = len(ibi_ms)
+    
     # Filtre physiologique
     ibi_clean = remove_outliers(
         rr_intervals=ibi_ms.tolist(),
@@ -269,7 +436,8 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
         high_rri=1500  # Production : 1500 ms (40 BPM)
     )
     
-    logger.info(f"📊 Après filtre physio : {len(ibi_ms)} → {len(ibi_clean)} IBI")
+    n_after_physio = len(ibi_clean)
+    logger.info(f"📊 Filtre physiologique : {n_initial} → {n_after_physio} IBI")
     
     # Filtre Malik TRÈS RELÂCHÉ pour PPG
     try:
@@ -278,10 +446,11 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
             method="malik",
             custom_removing_rule=0.50  # ✅ 50% tolérance PPG
         )
-        logger.info(f"📊 Après filtre Malik 50% : {len(ibi_clean)} IBI")
+        n_after_malik = len(ibi_clean)
+        logger.info(f"📊 Filtre Malik 50%     : {n_after_physio} → {n_after_malik} IBI")
     except Exception as e:
         # Si Malik échoue, garder filtre physio seulement
-        logger.warning(f"⚠️ Malik échoué, filtre physio seul : {e}")
+        logger.warning(f"⚠️ Malik échoué, filtre physio seul utilisé : {e}")
     
     # Convertir en array numpy
     ibi_clean = np.array(ibi_clean, dtype=np.float64)
@@ -300,7 +469,7 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
             detail=f"Trop peu d'IBI valides : {len(ibi_clean)} (min 20)"
         )
     
-    logger.info(f"✅ Outliers filtrés : {len(ibi_ms)} → {len(ibi_clean)} IBI")
+    logger.info(f"✅ Filtrage outliers terminé : {n_initial} → {len(ibi_clean)} IBI conservés")
     
     return ibi_clean
  
@@ -332,10 +501,18 @@ def calculate_hrv_features(ibi_clean: np.ndarray) -> dict:
         'SDNN': round(features['sdnn'], 1),
         'RMSSD': round(features['rmssd'], 1),
         'pNN50': round(features['pnni_50'], 1),  # ⚠️ Attention : pnni_50
-        'Entropy': round(shannon_entropy, 2)
+        'Entropy': round(shannon_entropy, 4)
     }
     
-    logger.info(f"✅ Features HRV calculées : BPM={result['Mean_BPM']}, SDNN={result['SDNN']}")
+    logger.info("=" * 60)
+    logger.info("📊 FEATURES HRV CALCULÉES")
+    logger.info("=" * 60)
+    logger.info(f"Mean_BPM : {result['Mean_BPM']:.1f} BPM")
+    logger.info(f"SDNN     : {result['SDNN']:.1f} ms")
+    logger.info(f"RMSSD    : {result['RMSSD']:.1f} ms")
+    logger.info(f"pNN50    : {result['pNN50']:.1f} %")
+    logger.info(f"Entropy  : {result['Entropy']:.4f}")
+    logger.info("=" * 60)
     
     return result
  
@@ -349,59 +526,77 @@ async def analyze_session(data: SessionData):
     Pipeline HRV complet avec détection FA
     Support : 1500+ échantillons (25Hz ou 100Hz)
     
+    ✅ NOUVEAU : Prédiction FA avec XGBoost
+    
     Modifications STEP 2 :
     - Accepte 1500+ échantillons (au lieu de 5400+)
     - Signal lissé matériellement (sampleAverage=4)
     - Validé scientifiquement pour 60s @ 25Hz
     """
     
-    logger.info(f"========================================")
-    logger.info(f"ANALYSE SESSION - Patient {data.patient_id}")
-    logger.info(f"========================================")
+    logger.info("=" * 60)
+    logger.info("🚀 ANALYSE SESSION - DÉMARRAGE")
+    logger.info("=" * 60)
+    logger.info(f"Patient ID : {data.patient_id}")
+    logger.info(f"Timestamp  : {data.timestamp}")
+    logger.info(f"SpO2       : {data.spo2}%")
+    logger.info("=" * 60)
     
     try:
         # ── Convertir en numpy ────────────────────────────
         signal = np.array(data.ppg_values, dtype=np.float64)
         
         # ── ÉTAPE 1 : Validation ──────────────────────────
+        logger.info("ÉTAPE 1/9 : Validation signal")
         validate_signal(signal)
         
         # ── ÉTAPE 2 : Calcul FS réelle ────────────────────
+        logger.info("ÉTAPE 2/9 : Calcul fréquence d'échantillonnage")
         fs_real = calculate_real_fs(signal, data.timestamps_us)
         
         # ── ÉTAPE 3 : Re-échantillonnage 125 Hz ───────────
+        logger.info("ÉTAPE 3/9 : Re-échantillonnage à 125 Hz")
         signal_125hz = resample_to_125hz(signal, fs_real)
         
         # ── ÉTAPE 4 : Filtrage Butterworth ────────────────
+        logger.info("ÉTAPE 4/9 : Filtrage Butterworth")
         signal_filtered = filter_butterworth(signal_125hz, fs=125)
         
         # ── ÉTAPE 4.5 : Normalisation pour HeartPy ────────
-        # HeartPy fonctionne mieux avec signal normalisé
+        logger.info("ÉTAPE 5/9 : Normalisation Z-score")
         signal_mean = np.mean(signal_filtered)
         signal_std = np.std(signal_filtered)
         
         if signal_std > 0:
             signal_normalized = (signal_filtered - signal_mean) / signal_std
-            logger.info(f"📊 Signal normalisé : mean=0, std=1")
+            logger.info(f"✅ Signal normalisé : mean=0, std=1")
         else:
             signal_normalized = signal_filtered
             logger.warning(f"⚠️ Signal std=0, normalisation ignorée")
         
         # ── ÉTAPE 5 : Détection pics HeartPy ──────────────
+        logger.info("ÉTAPE 6/9 : Détection pics HeartPy")
         working_data, measures = detect_peaks_heartpy(signal_normalized, fs=125)
         
         # ── ÉTAPE 6 : Calcul IBI ──────────────────────────
+        logger.info("ÉTAPE 7/9 : Calcul IBI (Inter-Beat Intervals)")
         ibi_ms = calculate_ibi(working_data, fs=125)
         
         # ── ÉTAPE 7 : Filtrage outliers ───────────────────
+        logger.info("ÉTAPE 8/9 : Filtrage outliers")
         ibi_clean = filter_outliers(ibi_ms)
         
         # ── ÉTAPE 8 : Features HRV ────────────────────────
+        logger.info("ÉTAPE 9/9 : Calcul features HRV")
         features = calculate_hrv_features(ibi_clean)
         
+        # ── ÉTAPE 9 : PRÉDICTION IA FA ────────────────────
+        prediction = predict_af(features)
+        
         # ── Retour résultat ───────────────────────────────
-        logger.info(f"✅ SUCCÈS - HRV calculées")
-        logger.info(f"========================================")
+        logger.info("=" * 60)
+        logger.info("✅ ANALYSE TERMINÉE AVEC SUCCÈS")
+        logger.info("=" * 60)
         
         return HRVResponse(
             status="success",
@@ -412,7 +607,12 @@ async def analyze_session(data: SessionData):
             pnn50=features['pNN50'],
             entropy=features['Entropy'],
             fs_real=round(fs_real, 1),
-            n_samples=len(signal)
+            n_samples=len(signal),
+            # ✅ RÉSULTATS IA
+            af_detected=prediction['label'],
+            af_probability=prediction['probability'],
+            af_risk=prediction['risk'],
+            af_confidence=prediction['confidence']
         )
         
     except HTTPException:
@@ -420,7 +620,11 @@ async def analyze_session(data: SessionData):
         raise
     
     except Exception as e:
-        logger.error(f"❌ ERREUR INATTENDUE : {str(e)}")
+        logger.error("=" * 60)
+        logger.error("❌ ERREUR INATTENDUE")
+        logger.error("=" * 60)
+        logger.error(f"Erreur : {str(e)}")
+        logger.error("=" * 60)
         raise HTTPException(
             status_code=500,
             detail=f"Erreur pipeline HRV : {str(e)}"
