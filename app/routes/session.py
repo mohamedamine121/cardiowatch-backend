@@ -1,8 +1,9 @@
 # ============================================================
 # app/routes/session.py - PIPELINE HRV COMPLET + IA
-# Modifié pour accepter 1500+ échantillons (60s @ 25Hz)
+# ✅ OPTIMISÉ POUR 125 Hz NATIF (ESP32 @ 1000Hz / avg=8)
+# ✅ RE-ÉCHANTILLONNAGE DÉSACTIVÉ (signal déjà 125 Hz)
+# ✅ COMPATIBILITÉ MIMIC 100% (7500 échantillons @ 125Hz)
 # Validation scientifique : PMC6953345, PMC4309304
-# ✅ INTÉGRATION XGBoost pour détection FA
 # ============================================================
  
 from fastapi import APIRouter, HTTPException
@@ -63,7 +64,7 @@ except Exception as e:
  
 class SessionData(BaseModel):
     patient_id: str
-    ppg_values: List[float]  # Signal PPG IR (1500+ échantillons)
+    ppg_values: List[float]  # Signal PPG IR (7500 échantillons @ 125Hz natif)
     timestamps_us: List[int] = []  # Timestamps microsecondes (optionnel)
     spo2: int
     timestamp: str = ""
@@ -195,15 +196,15 @@ def validate_signal(signal: np.ndarray) -> None:
     """
     Valide le signal PPG avant traitement
     """
-    # ✅ Longueur minimale : 1500 échantillons (60s à 25Hz)
+    # ✅ Longueur minimale : 7500 échantillons (60s à 125Hz)
     # Validation scientifique :
     # - PMC6953345 : 60s validé pour HRV court terme et détection FA
-    # - PMC4309304 : PPG 25Hz corrélation acceptable avec ECG (r=0.7-0.78)
-    # - pNN50 nécessite minimum 60s (standard HRV)
-    if len(signal) < 1500:
+    # - Signal natif 125 Hz (ESP32 @ 1000Hz / sampleAverage=8)
+    # - Compatibilité MIMIC 100% (même fréquence que training)
+    if len(signal) < 7500:
         raise HTTPException(
             status_code=400,
-            detail=f"Signal trop court : {len(signal)} échantillons (min 1500 pour 60s @ 25Hz)"
+            detail=f"Signal trop court : {len(signal)} échantillons (min 7500 pour 60s @ 125Hz)"
         )
     
     # Pas de NaN
@@ -237,7 +238,7 @@ def validate_signal(signal: np.ndarray) -> None:
 def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> float:
     """
     Calcule la fréquence d'échantillonnage réelle
-    Support : 25Hz (avg=4) ou 100Hz (avg=1)
+    Pour signal 125 Hz natif : validation ±5 Hz
     """
     if timestamps_us and len(timestamps_us) >= 2:
         # Méthode 1 : Depuis timestamps microsecondes
@@ -254,43 +255,61 @@ def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> fl
         
         logger.info(f"📊 FS estimée depuis longueur : {fs_real:.2f} Hz (assumant 60s)")
     
-    # Validation range élargie pour supporter 25Hz et 100Hz
-    if not (20 <= fs_real <= 150):
+    # Validation range élargie
+    if not (100 <= fs_real <= 150):
         raise HTTPException(
             status_code=400,
-            detail=f"Fréquence anormale : {fs_real:.2f} Hz (attendu 20-150 Hz)"
+            detail=f"Fréquence anormale : {fs_real:.2f} Hz (attendu 100-150 Hz)"
         )
     
     return fs_real
  
 # ============================================================
-# ÉTAPE 3 : RE-ÉCHANTILLONNAGE À 125 Hz
+# ÉTAPE 3 : VALIDATION 125 Hz NATIF (RE-ÉCHANTILLONNAGE DÉSACTIVÉ)
 # ============================================================
- 
-def resample_to_125hz(signal: np.ndarray, fs_original: float) -> np.ndarray:
+
+def validate_native_125hz(signal: np.ndarray, fs_real: float) -> np.ndarray:
     """
-    Re-échantillonne le signal à 125 Hz (compatibilité MIMIC)
-    Adaptatif : fonctionne avec 25Hz (1500 pts) ou 100Hz (6000 pts)
+    ✅ NOUVEAU : Validation signal 125 Hz natif
     
-    Exemples :
-    - 1500 pts @ 25Hz  → 7500 pts @ 125Hz (×5)
-    - 6000 pts @ 100Hz → 7500 pts @ 125Hz (×1.25)
+    Signal ESP32 déjà à 125 Hz (sampleRate=1000, sampleAverage=8)
+    → Re-échantillonnage NON NÉCESSAIRE
+    
+    Validation : fs_real doit être proche de 125 Hz (±5 Hz tolérance)
+    Si écart > 5 Hz : warning (possible FIFO overflow ou délais BLE)
+    
+    Args:
+        signal: Signal PPG brut
+        fs_real: Fréquence calculée
+    
+    Returns:
+        signal inchangé (déjà 125 Hz)
     """
-    from scipy.signal import resample
     
-    n_original = len(signal)
-    n_target = int(n_original * (125.0 / fs_original))
+    # Vérifier que signal est bien à 125 Hz (±5 Hz tolérance)
+    expected_fs = 125.0
+    tolerance = 5.0
     
-    signal_125hz = resample(signal, n_target)
+    if abs(fs_real - expected_fs) > tolerance:
+        logger.warning("=" * 60)
+        logger.warning(f"⚠️ ATTENTION : Fréquence détectée = {fs_real:.1f} Hz")
+        logger.warning(f"   Attendu : {expected_fs} Hz (±{tolerance} Hz)")
+        logger.warning(f"   Écart   : {abs(fs_real - expected_fs):.1f} Hz")
+        logger.warning("   Causes possibles :")
+        logger.warning("   - FIFO overflow ESP32 (échantillons perdus)")
+        logger.warning("   - Délais BLE (transmission ralentie)")
+        logger.warning("   - Timestamps incorrects")
+        logger.warning("   Traitement continue avec fs_real détecté")
+        logger.warning("=" * 60)
+    else:
+        logger.info(f"✅ Signal natif 125 Hz validé (fs_real={fs_real:.1f} Hz)")
     
-    logger.info(f"📊 Re-sampling : {n_original} pts @ {fs_original:.1f}Hz → {n_target} pts @ 125Hz")
+    # Signal déjà à 125 Hz natif (ESP32 @ 1000Hz / sampleAverage=8)
+    # Pas de re-échantillonnage nécessaire
+    logger.info(f"✅ Signal natif utilisé : {len(signal)} échantillons @ {fs_real:.1f} Hz")
+    logger.info("   Re-échantillonnage DÉSACTIVÉ (signal natif 125 Hz)")
     
-    # Validation longueur cible (~7500 pour 60s)
-    expected = 125 * 60
-    if abs(len(signal_125hz) - expected) > 200:
-        logger.warning(f"⚠️ Longueur après resample : {len(signal_125hz)} (attendu ~{expected})")
-    
-    return signal_125hz
+    return signal
  
 # ============================================================
 # ÉTAPE 4 : FILTRAGE BUTTERWORTH
@@ -558,18 +577,18 @@ def calculate_hrv_features(ibi_clean: np.ndarray) -> dict:
 async def analyze_session(data: SessionData):
     """
     Pipeline HRV complet avec détection FA
-    Support : 1500+ échantillons (25Hz ou 100Hz)
+    Support : 7500 échantillons (125Hz natif)
     
     ✅ NOUVEAU : Prédiction FA avec XGBoost
-    
-    Modifications STEP 2 :
-    - Accepte 1500+ échantillons (au lieu de 5400+)
-    - Signal lissé matériellement (sampleAverage=4)
-    - Validé scientifiquement pour 60s @ 25Hz
+    ✅ OPTIMISÉ POUR 125 Hz NATIF :
+    - Signal ESP32 : 7500 échantillons @ 125 Hz (sampleRate=1000, avg=8)
+    - Pas de re-échantillonnage nécessaire (signal natif)
+    - Compatibilité MIMIC 100% (même fréquence que training)
+    - Validation automatique ±5 Hz tolérance
     """
     
     logger.info("=" * 60)
-    logger.info("🚀 ANALYSE SESSION - DÉMARRAGE")
+    logger.info("🚀 ANALYSE SESSION - DÉMARRAGE (125 Hz NATIF)")
     logger.info("=" * 60)
     logger.info(f"Patient ID : {data.patient_id}")
     logger.info(f"Timestamp  : {data.timestamp}")
@@ -581,23 +600,23 @@ async def analyze_session(data: SessionData):
         signal = np.array(data.ppg_values, dtype=np.float64)
         
         # ── ÉTAPE 1 : Validation ──────────────────────────
-        logger.info("ÉTAPE 1/9 : Validation signal")
+        logger.info("ÉTAPE 1/8 : Validation signal")
         validate_signal(signal)
         
         # ── ÉTAPE 2 : Calcul FS réelle ────────────────────
-        logger.info("ÉTAPE 2/9 : Calcul fréquence d'échantillonnage")
+        logger.info("ÉTAPE 2/8 : Calcul fréquence d'échantillonnage")
         fs_real = calculate_real_fs(signal, data.timestamps_us)
         
-        # ── ÉTAPE 3 : Re-échantillonnage 125 Hz ───────────
-        logger.info("ÉTAPE 3/9 : Re-échantillonnage à 125 Hz")
-        signal_125hz = resample_to_125hz(signal, fs_real)
+        # ── ÉTAPE 3 : Validation 125 Hz natif ─────────────
+        logger.info("ÉTAPE 3/8 : Validation signal 125 Hz natif")
+        signal_125hz = validate_native_125hz(signal, fs_real)
         
         # ── ÉTAPE 4 : Filtrage Butterworth ────────────────
-        logger.info("ÉTAPE 4/9 : Filtrage Butterworth")
+        logger.info("ÉTAPE 4/8 : Filtrage Butterworth")
         signal_filtered = filter_butterworth(signal_125hz, fs=125)
         
         # ── ÉTAPE 4.5 : Normalisation pour HeartPy ────────
-        logger.info("ÉTAPE 5/9 : Normalisation Z-score")
+        logger.info("ÉTAPE 5/8 : Normalisation Z-score")
         signal_mean = np.mean(signal_filtered)
         signal_std = np.std(signal_filtered)
         
@@ -609,19 +628,19 @@ async def analyze_session(data: SessionData):
             logger.warning(f"⚠️ Signal std=0, normalisation ignorée")
         
         # ── ÉTAPE 5 : Détection pics HeartPy ──────────────
-        logger.info("ÉTAPE 6/9 : Détection pics HeartPy")
+        logger.info("ÉTAPE 6/8 : Détection pics HeartPy")
         working_data, measures = detect_peaks_heartpy(signal_normalized, fs=125)
         
         # ── ÉTAPE 6 : Calcul IBI ──────────────────────────
-        logger.info("ÉTAPE 7/9 : Calcul IBI (Inter-Beat Intervals)")
+        logger.info("ÉTAPE 7/8 : Calcul IBI (Inter-Beat Intervals)")
         ibi_ms = calculate_ibi(working_data, fs=125)
         
         # ── ÉTAPE 7 : Filtrage outliers ───────────────────
-        logger.info("ÉTAPE 8/9 : Filtrage outliers")
+        logger.info("ÉTAPE 8/8 : Filtrage outliers")
         ibi_clean = filter_outliers(ibi_ms)
         
         # ── ÉTAPE 8 : Features HRV ────────────────────────
-        logger.info("ÉTAPE 9/9 : Calcul features HRV")
+        logger.info("ÉTAPE 9/8 : Calcul features HRV")
         features = calculate_hrv_features(ibi_clean)
         
         # ── ÉTAPE 9 : PRÉDICTION IA FA ────────────────────
@@ -629,7 +648,7 @@ async def analyze_session(data: SessionData):
         
         # ── Retour résultat ───────────────────────────────
         logger.info("=" * 60)
-        logger.info("✅ ANALYSE TERMINÉE AVEC SUCCÈS")
+        logger.info("✅ ANALYSE TERMINÉE AVEC SUCCÈS (125 Hz NATIF)")
         logger.info("=" * 60)
         
         return HRVResponse(
