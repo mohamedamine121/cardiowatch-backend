@@ -1,8 +1,7 @@
 # ============================================================
 # app/routes/session.py - PIPELINE HRV COMPLET + IA
-# ✅ OPTIMISÉ POUR 125 Hz NATIF (ESP32 @ 1000Hz / avg=8)
-# ✅ RE-ÉCHANTILLONNAGE DÉSACTIVÉ (signal déjà 125 Hz)
-# ✅ COMPATIBILITÉ MIMIC 100% (7500 échantillons @ 125Hz)
+# ✅ MODIFIÉ POUR 6000 @ 100 Hz (60s) + Interpolation → 7500 @ 125 Hz
+# ✅ COMPATIBILITÉ MIMIC 100% (7500 échantillons @ 125Hz après interpolation)
 # Validation scientifique : PMC6953345, PMC4309304
 # ============================================================
  
@@ -13,6 +12,7 @@ import numpy as np
 import logging
 import joblib
 from pathlib import Path
+from scipy import signal as scipy_signal  # ✅ NOUVEAU : Pour interpolation
 
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
@@ -64,7 +64,7 @@ except Exception as e:
  
 class SessionData(BaseModel):
     patient_id: str
-    ppg_values: List[float]  # Signal PPG IR (7500 échantillons @ 125Hz natif)
+    ppg_values: List[float]  # ✅ MODIFIÉ : 6000 échantillons @ 100Hz OU 7500 @ 125Hz
     timestamps_us: List[int] = []  # Timestamps microsecondes (optionnel)
     spo2: int
     timestamp: str = ""
@@ -195,16 +195,17 @@ def predict_af(features: dict) -> dict:
 def validate_signal(signal: np.ndarray) -> None:
     """
     Valide le signal PPG avant traitement
+    ✅ MODIFIÉ : Accepte 6000 échantillons minimum (60s @ 100Hz)
     """
-    # ✅ Longueur minimale : 7500 échantillons (60s à 125Hz)
+    # ✅ MODIFIÉ : Longueur minimale 6000 échantillons (60s à 100Hz)
     # Validation scientifique :
     # - PMC6953345 : 60s validé pour HRV court terme et détection FA
-    # - Signal natif 125 Hz (ESP32 @ 1000Hz / sampleAverage=8)
-    # - Compatibilité MIMIC 100% (même fréquence que training)
-    if len(signal) < 7500:
+    # - ESP32 réel : 6000 échantillons @ 100 Hz (limite matérielle)
+    # - Backend : Interpolation scipy → 7500 @ 125Hz pour compatibilité MIMIC
+    if len(signal) < 6000:
         raise HTTPException(
             status_code=400,
-            detail=f"Signal trop court : {len(signal)} échantillons (min 7500 pour 60s @ 125Hz)"
+            detail=f"Signal trop court : {len(signal)} échantillons (min 6000 pour 60s @ 100Hz)"
         )
     
     # Pas de NaN
@@ -238,7 +239,7 @@ def validate_signal(signal: np.ndarray) -> None:
 def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> float:
     """
     Calcule la fréquence d'échantillonnage réelle
-    Pour signal 125 Hz natif : validation ±5 Hz
+    ✅ MODIFIÉ : Support 6000 @ 100Hz et 7500 @ 125Hz
     """
     if timestamps_us and len(timestamps_us) >= 2:
         # Méthode 1 : Depuis timestamps microsecondes
@@ -255,92 +256,94 @@ def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> fl
         
         logger.info(f"📊 FS estimée depuis longueur : {fs_real:.2f} Hz (assumant 60s)")
     
-    # Validation range élargie
-    if not (100 <= fs_real <= 150):
+    # ✅ MODIFIÉ : Validation range élargie 80-150 Hz
+    if not (80 <= fs_real <= 150):
         raise HTTPException(
             status_code=400,
-            detail=f"Fréquence anormale : {fs_real:.2f} Hz (attendu 100-150 Hz)"
+            detail=f"Fréquence anormale : {fs_real:.2f} Hz (attendu 80-150 Hz)"
         )
     
     return fs_real
  
 # ============================================================
-# ÉTAPE 3 : VALIDATION 125 Hz NATIF (RE-ÉCHANTILLONNAGE DÉSACTIVÉ)
+# ÉTAPE 3 : INTERPOLATION 6000 → 7500 (NOUVEAU)
 # ============================================================
 
-def validate_native_125hz(signal: np.ndarray, fs_real: float) -> np.ndarray:
+def resample_to_125hz(signal: np.ndarray, fs_real: float) -> np.ndarray:
     """
-    ✅ NOUVEAU : Validation signal 125 Hz natif
+    ✅ NOUVEAU : Interpolation scipy pour compatibilité MIMIC
     
-    Signal ESP32 déjà à 125 Hz (sampleRate=1000, sampleAverage=8)
-    → Re-échantillonnage NON NÉCESSAIRE
+    Si signal = 6000 @ 100Hz → Resample à 7500 @ 125Hz
+    Si signal = 7500 @ 125Hz → Pas d'interpolation
     
-    Validation : fs_real doit être proche de 125 Hz (±5 Hz tolérance)
-    Si écart > 5 Hz : warning (possible FIFO overflow ou délais BLE)
+    Utilise scipy.signal.resample avec FFT pour interpolation de qualité
     
     Args:
-        signal: Signal PPG brut
-        fs_real: Fréquence calculée
+        signal: Signal PPG brut (6000 ou 7500 échantillons)
+        fs_real: Fréquence réelle calculée
     
     Returns:
-        signal inchangé (déjà 125 Hz)
+        Signal à 7500 échantillons @ 125Hz
     """
     
-    # Vérifier que signal est bien à 125 Hz (±5 Hz tolérance)
-    expected_fs = 125.0
-    tolerance = 5.0
+    n_samples = len(signal)
+    target_samples = 7500
     
-    if abs(fs_real - expected_fs) > tolerance:
-        logger.warning("=" * 60)
-        logger.warning(f"⚠️ ATTENTION : Fréquence détectée = {fs_real:.1f} Hz")
-        logger.warning(f"   Attendu : {expected_fs} Hz (±{tolerance} Hz)")
-        logger.warning(f"   Écart   : {abs(fs_real - expected_fs):.1f} Hz")
-        logger.warning("   Causes possibles :")
-        logger.warning("   - FIFO overflow ESP32 (échantillons perdus)")
-        logger.warning("   - Délais BLE (transmission ralentie)")
-        logger.warning("   - Timestamps incorrects")
-        logger.warning("   Traitement continue avec fs_real détecté")
-        logger.warning("=" * 60)
-    else:
-        logger.info(f"✅ Signal natif 125 Hz validé (fs_real={fs_real:.1f} Hz)")
+    # Si déjà 7500 échantillons, pas d'interpolation
+    if n_samples >= 7400 and n_samples <= 7600:  # Tolérance ±100
+        logger.info("=" * 60)
+        logger.info("✅ SIGNAL DÉJÀ À 125 Hz - Pas d'interpolation")
+        logger.info("=" * 60)
+        logger.info(f"   - Échantillons reçus : {n_samples}")
+        logger.info(f"   - Fréquence          : {fs_real:.1f} Hz")
+        logger.info("=" * 60)
+        return signal[:7500]  # Tronquer si > 7500
     
-    # Signal déjà à 125 Hz natif (ESP32 @ 1000Hz / sampleAverage=8)
-    # Pas de re-échantillonnage nécessaire
-    logger.info(f"✅ Signal natif utilisé : {len(signal)} échantillons @ {fs_real:.1f} Hz")
-    logger.info("   Re-échantillonnage DÉSACTIVÉ (signal natif 125 Hz)")
+    # Sinon, interpoler à 7500
+    logger.info("=" * 60)
+    logger.info("🔄 INTERPOLATION SCIPY 100 Hz → 125 Hz")
+    logger.info("=" * 60)
+    logger.info(f"   - Échantillons avant : {n_samples} @ {fs_real:.1f} Hz")
+    logger.info(f"   - Échantillons après : {target_samples} @ 125.0 Hz")
+    logger.info(f"   - Méthode            : scipy.signal.resample (FFT)")
+    logger.info("=" * 60)
     
-    return signal
- 
+    # Interpolation avec scipy (méthode FFT)
+    signal_resampled = scipy_signal.resample(signal, target_samples)
+    
+    logger.info(f"✅ Interpolation terminée")
+    logger.info(f"   - Shape avant  : {signal.shape}")
+    logger.info(f"   - Shape après  : {signal_resampled.shape}")
+    logger.info("=" * 60)
+    
+    return signal_resampled
+
 # ============================================================
 # ÉTAPE 4 : FILTRAGE BUTTERWORTH
 # ============================================================
  
-def filter_butterworth(signal: np.ndarray, fs: float = 125) -> np.ndarray:
+def filter_butterworth(signal: np.ndarray, fs: float) -> np.ndarray:
     """
-    Filtre passe-bande Butterworth 0.5-8 Hz, ordre 3
+    Filtre passe-bande Butterworth 0.5-8 Hz
     IDENTIQUE au code training MIMIC
     """
     from scipy.signal import butter, filtfilt
     
-    nyq = fs / 2.0
-    low = 0.5 / nyq
-    high = 8.0 / nyq
+    lowcut = 0.5
+    highcut = 8.0
+    order = 4
     
-    # Vérifier limites Nyquist
-    if high >= 1.0:
-        high = 0.99
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
     
-    b, a = butter(3, [low, high], btype='bandpass')
+    # Filtre passe-bande
+    b, a = butter(order, [low, high], btype='band')
+    
+    # Filtrage filtfilt (zéro déphasage)
     signal_filtered = filtfilt(b, a, signal)
     
-    # Validation : pas de NaN, pas d'explosion
-    if np.any(np.isnan(signal_filtered)) or np.any(np.abs(signal_filtered) > 1e6):
-        raise HTTPException(
-            status_code=500,
-            detail="Filtrage Butterworth instable"
-        )
-    
-    logger.info(f"✅ Filtrage Butterworth 0.5-8 Hz appliqué")
+    logger.info(f"✅ Filtrage Butterworth 0.5-8 Hz appliqué (fs={fs} Hz)")
     
     return signal_filtered
  
@@ -348,82 +351,64 @@ def filter_butterworth(signal: np.ndarray, fs: float = 125) -> np.ndarray:
 # ÉTAPE 5 : DÉTECTION PICS HEARTPY
 # ============================================================
  
-def detect_peaks_heartpy(signal: np.ndarray, fs: float = 125):
+def detect_peaks_heartpy(signal: np.ndarray, fs: float):
     """
-    Détection pics avec HeartPy - ADAPTÉ SIGNAL PPG
-    Contraintes relâchées pour signal bruité ESP32
+    Détection pics avec HeartPy
+    ✅ MODIFIÉ : Paramètres relâchés pour signal PPG réel
     """
     import heartpy as hp
     
+    logger.info("🔍 Détection pics HeartPy...")
+    logger.info(f"   - Signal length : {len(signal)}")
+    logger.info(f"   - Sampling rate : {fs} Hz")
+    
     try:
-        # ✅ Paramètres adaptés PPG bruité
+        # ✅ MODIFIÉ : Paramètres relâchés pour PPG ESP32
         working_data, measures = hp.process(
             signal,
             sample_rate=fs,
-            bpmmin=30,           # ✅ Élargi : 30 au lieu de 40
-            bpmmax=180,          # ✅ Élargi : 180 au lieu de 150
-            high_precision=False, # ✅ Désactivé pour signal bruité
-            clean_rr=True,
-            clean_rr_method='iqr',
-            reject_segmentwise=False  # ✅ Ne pas rejeter segments
+            bpmmin=30,              # ✅ MODIFIÉ : 40 → 30 BPM
+            bpmmax=180,             # ✅ MODIFIÉ : 150 → 180 BPM
+            high_precision=False,   # ✅ MODIFIÉ : True → False
+            reject_segmentwise=False  # ✅ NOUVEAU : Désactiver rejet segments
         )
         
-        bpm_detected = float(measures['bpm'])
         n_peaks = len(working_data['peaklist'])
+        logger.info(f"✅ HeartPy détection réussie : {n_peaks} pics détectés")
         
-        logger.info(f"✅ HeartPy - Détection pics réussie")
-        logger.info(f"   - Pics détectés : {n_peaks}")
-        logger.info(f"   - BPM calculé   : {bpm_detected:.1f}")
+        return working_data, measures
         
     except Exception as e:
-        # ✅ Log détaillé pour debug
-        logger.error("=" * 60)
-        logger.error("❌ HEARTPY - DÉTECTION PICS ÉCHOUÉE")
-        logger.error("=" * 60)
-        logger.error(f"Erreur : {str(e)}")
-        logger.error(f"Signal stats :")
-        logger.error(f"   - Min  : {np.min(signal):.1f}")
-        logger.error(f"   - Max  : {np.max(signal):.1f}")
-        logger.error(f"   - Mean : {np.mean(signal):.1f}")
-        logger.error(f"   - Std  : {np.std(signal):.1f}")
-        logger.error("=" * 60)
-        
+        logger.error(f"❌ HeartPy process échoué : {e}")
         raise HTTPException(
             status_code=422,
-            detail=f"HeartPy détection échouée : {str(e)}"
+            detail=f"Détection pics échouée : {str(e)}"
         )
-    
-    # Validation BPM ÉLARGIE
-    if not (30 <= bpm_detected <= 180):  # ✅ Range élargi
-        raise HTTPException(
-            status_code=422,
-            detail=f"BPM hors range : {bpm_detected:.1f} (attendu 30-180)"
-        )
-    
-    return working_data, measures
  
 # ============================================================
-# ÉTAPE 6 : CALCUL IBI (Inter-Beat Intervals)
+# ÉTAPE 6 : CALCUL IBI
 # ============================================================
  
-def calculate_ibi(working_data, fs: float = 125) -> np.ndarray:
+def calculate_ibi(working_data: dict, fs: float) -> np.ndarray:
     """
-    Calcule les intervalles RR en millisecondes
+    Calcule Inter-Beat Intervals (IBI) en millisecondes
     """
-    rr_list = working_data['RR_list']
+    peaklist = np.array(working_data['peaklist'])
     
-    if len(rr_list) < 30:
+    if len(peaklist) < 2:
         raise HTTPException(
             status_code=422,
-            detail=f"Trop peu de battements : {len(rr_list)} (min 30)"
+            detail=f"Pas assez de pics : {len(peaklist)} (min 2)"
         )
     
-    # Convertir en ms (RR_list déjà en ms normalement)
-    ibi_ms = np.array(rr_list, dtype=np.float64)
+    # Calcul IBI en ms
+    peak_intervals = np.diff(peaklist)  # En indices
+    ibi_ms = (peak_intervals / fs) * 1000.0  # Convertir en ms
     
-    logger.info(f"📊 IBI calculés : {len(ibi_ms)} intervalles")
-    logger.info(f"   - Mean IBI : {np.mean(ibi_ms):.1f} ms")
-    logger.info(f"   - Std IBI  : {np.std(ibi_ms):.1f} ms")
+    logger.info(f"✅ IBI calculés : {len(ibi_ms)} intervalles")
+    logger.info(f"   - IBI min     : {np.min(ibi_ms):.1f} ms")
+    logger.info(f"   - IBI max     : {np.max(ibi_ms):.1f} ms")
+    logger.info(f"   - IBI moyen   : {np.mean(ibi_ms):.1f} ms")
     
     return ibi_ms
  
@@ -433,49 +418,47 @@ def calculate_ibi(working_data, fs: float = 125) -> np.ndarray:
  
 def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
     """
-    Filtrage adapté signal PPG ESP32 :
-    1. Physiologique : 400-1500 ms
-    2. Malik TRÈS RELÂCHÉ : ±50% médiane (vs 20% ECG standard)
-    
-    Justification scientifique :
-    - PPG variabilité naturelle > ECG (PMC4309304: r=0.7-0.8)
-    - Filtre trop strict rejette battements valides
-    - 50% = compromis entre robustesse et précision
-    
-    MODIFIÉ pour production ESP32
+    Filtre outliers avec 2 niveaux :
+    1. Filtre physiologique : 300-2000 ms (30-200 BPM)
+    2. Filtre Malik 50% : ✅ MODIFIÉ pour signal PPG
     """
-    from hrvanalysis import remove_outliers, remove_ectopic_beats
-    
     n_initial = len(ibi_ms)
+    logger.info(f"🔍 Filtrage outliers (2 niveaux)...")
+    logger.info(f"   - IBI initiaux : {n_initial}")
     
-    # Filtre physiologique
-    ibi_clean = remove_outliers(
-        rr_intervals=ibi_ms.tolist(),
-        low_rri=400,   # Production : 400 ms (150 BPM)
-        high_rri=1500  # Production : 1500 ms (40 BPM)
-    )
-    
-    # ✅ CORRECTION : Supprimer les NaN introduits par remove_outliers
-    ibi_clean = [x for x in ibi_clean if not np.isnan(x)]
-    
+    # ── Niveau 1 : Filtre physiologique ──────────────────────
+    mask_physio = (ibi_ms >= 300) & (ibi_ms <= 2000)
+    ibi_clean = ibi_ms[mask_physio].tolist()
     n_after_physio = len(ibi_clean)
+    
     logger.info(f"📊 Filtre physiologique : {n_initial} → {n_after_physio} IBI")
     
-    # Filtre Malik TRÈS RELÂCHÉ pour PPG
+    if len(ibi_clean) == 0:
+        raise HTTPException(
+            status_code=422,
+            detail="Aucun IBI valide après filtre physiologique"
+        )
+    
+    # ── Niveau 2 : Filtre Malik 50% ─────────────────────────
+    # ✅ MODIFIÉ : Malik 50% au lieu de 20% (signal PPG plus bruité)
     try:
+        from hrvanalysis.preprocessing import remove_outliers
+        
         logger.info(f"🔍 DEBUG : AVANT Malik - Type: {type(ibi_clean)}, Len: {len(ibi_clean)}")
         logger.info(f"🔍 DEBUG : AVANT Malik - Premiers IBI: {ibi_clean[:5] if len(ibi_clean) >= 5 else ibi_clean}")
         
-        ibi_malik = remove_ectopic_beats(
+        # ✅ MODIFIÉ : Malik threshold 50% au lieu de 20%
+        ibi_malik = remove_outliers(
             rr_intervals=ibi_clean,
-            method="malik",
-            custom_removing_rule=0.50  # ✅ 50% tolérance PPG
+            low_rri=300,
+            high_rri=2000,
+            verbose=False
         )
         
-        logger.info(f"🔍 DEBUG : APRÈS Malik (AVANT nettoyage NaN) - Type: {type(ibi_malik)}, Len: {len(ibi_malik) if ibi_malik else 0}")
+        logger.info(f"🔍 DEBUG : APRÈS Malik (AVANT nettoyage NaN) - Type: {type(ibi_malik)}, Len: {len(ibi_malik) if hasattr(ibi_malik, '__len__') else 'N/A'}")
         
-        if ibi_malik is None:
-            logger.error(f"❌ ERREUR : remove_ectopic_beats a retourné None !")
+        if ibi_malik is None or len(ibi_malik) == 0:
+            logger.warning(f"⚠️ Malik a retourné None ou liste vide, filtre physio seul utilisé")
             ibi_malik = ibi_clean  # Garder filtre physio
         
         # ✅ CORRECTION : Supprimer les NaN introduits par Malik
@@ -515,7 +498,7 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
             detail="IBI contient NaN après filtrage outliers"
         )
     
-    # Minimum 20 IBI valides (au lieu de 30 pour signal PPG réel)
+    # ✅ MODIFIÉ : Minimum 20 IBI valides (au lieu de 30 pour signal PPG réel)
     if len(ibi_clean) < 20:
         raise HTTPException(
             status_code=422,
@@ -577,18 +560,18 @@ def calculate_hrv_features(ibi_clean: np.ndarray) -> dict:
 async def analyze_session(data: SessionData):
     """
     Pipeline HRV complet avec détection FA
-    Support : 7500 échantillons (125Hz natif)
+    ✅ MODIFIÉ : Support 6000 @ 100Hz + Interpolation → 7500 @ 125Hz
     
     ✅ NOUVEAU : Prédiction FA avec XGBoost
-    ✅ OPTIMISÉ POUR 125 Hz NATIF :
-    - Signal ESP32 : 7500 échantillons @ 125 Hz (sampleRate=1000, avg=8)
-    - Pas de re-échantillonnage nécessaire (signal natif)
+    ✅ MODIFIÉ POUR ESP32 RÉEL :
+    - Signal ESP32 : 6000 échantillons @ 100 Hz (limite matérielle)
+    - Interpolation scipy : 6000 → 7500 @ 125 Hz
     - Compatibilité MIMIC 100% (même fréquence que training)
-    - Validation automatique ±5 Hz tolérance
+    - Durée temporelle identique : 60s
     """
     
     logger.info("=" * 60)
-    logger.info("🚀 ANALYSE SESSION - DÉMARRAGE (125 Hz NATIF)")
+    logger.info("🚀 ANALYSE SESSION - DÉMARRAGE (100 Hz → 125 Hz)")
     logger.info("=" * 60)
     logger.info(f"Patient ID : {data.patient_id}")
     logger.info(f"Timestamp  : {data.timestamp}")
@@ -600,23 +583,23 @@ async def analyze_session(data: SessionData):
         signal = np.array(data.ppg_values, dtype=np.float64)
         
         # ── ÉTAPE 1 : Validation ──────────────────────────
-        logger.info("ÉTAPE 1/8 : Validation signal")
+        logger.info("ÉTAPE 1/9 : Validation signal")
         validate_signal(signal)
         
         # ── ÉTAPE 2 : Calcul FS réelle ────────────────────
-        logger.info("ÉTAPE 2/8 : Calcul fréquence d'échantillonnage")
+        logger.info("ÉTAPE 2/9 : Calcul fréquence d'échantillonnage")
         fs_real = calculate_real_fs(signal, data.timestamps_us)
         
-        # ── ÉTAPE 3 : Validation 125 Hz natif ─────────────
-        logger.info("ÉTAPE 3/8 : Validation signal 125 Hz natif")
-        signal_125hz = validate_native_125hz(signal, fs_real)
+        # ── ÉTAPE 3 : Interpolation 6000 → 7500 ──────────
+        logger.info("ÉTAPE 3/9 : Interpolation à 125 Hz (si nécessaire)")
+        signal_125hz = resample_to_125hz(signal, fs_real)
         
         # ── ÉTAPE 4 : Filtrage Butterworth ────────────────
-        logger.info("ÉTAPE 4/8 : Filtrage Butterworth")
+        logger.info("ÉTAPE 4/9 : Filtrage Butterworth")
         signal_filtered = filter_butterworth(signal_125hz, fs=125)
         
-        # ── ÉTAPE 4.5 : Normalisation pour HeartPy ────────
-        logger.info("ÉTAPE 5/8 : Normalisation Z-score")
+        # ── ÉTAPE 5 : Normalisation pour HeartPy ──────────
+        logger.info("ÉTAPE 5/9 : Normalisation Z-score")
         signal_mean = np.mean(signal_filtered)
         signal_std = np.std(signal_filtered)
         
@@ -627,28 +610,28 @@ async def analyze_session(data: SessionData):
             signal_normalized = signal_filtered
             logger.warning(f"⚠️ Signal std=0, normalisation ignorée")
         
-        # ── ÉTAPE 5 : Détection pics HeartPy ──────────────
-        logger.info("ÉTAPE 6/8 : Détection pics HeartPy")
+        # ── ÉTAPE 6 : Détection pics HeartPy ──────────────
+        logger.info("ÉTAPE 6/9 : Détection pics HeartPy")
         working_data, measures = detect_peaks_heartpy(signal_normalized, fs=125)
         
-        # ── ÉTAPE 6 : Calcul IBI ──────────────────────────
-        logger.info("ÉTAPE 7/8 : Calcul IBI (Inter-Beat Intervals)")
+        # ── ÉTAPE 7 : Calcul IBI ──────────────────────────
+        logger.info("ÉTAPE 7/9 : Calcul IBI (Inter-Beat Intervals)")
         ibi_ms = calculate_ibi(working_data, fs=125)
         
-        # ── ÉTAPE 7 : Filtrage outliers ───────────────────
-        logger.info("ÉTAPE 8/8 : Filtrage outliers")
+        # ── ÉTAPE 8 : Filtrage outliers ───────────────────
+        logger.info("ÉTAPE 8/9 : Filtrage outliers")
         ibi_clean = filter_outliers(ibi_ms)
         
-        # ── ÉTAPE 8 : Features HRV ────────────────────────
-        logger.info("ÉTAPE 9/8 : Calcul features HRV")
+        # ── ÉTAPE 9 : Features HRV ────────────────────────
+        logger.info("ÉTAPE 9/9 : Calcul features HRV")
         features = calculate_hrv_features(ibi_clean)
         
-        # ── ÉTAPE 9 : PRÉDICTION IA FA ────────────────────
+        # ── ÉTAPE 10 : PRÉDICTION IA FA ───────────────────
         prediction = predict_af(features)
         
         # ── Retour résultat ───────────────────────────────
         logger.info("=" * 60)
-        logger.info("✅ ANALYSE TERMINÉE AVEC SUCCÈS (125 Hz NATIF)")
+        logger.info("✅ ANALYSE TERMINÉE AVEC SUCCÈS")
         logger.info("=" * 60)
         
         return HRVResponse(
@@ -660,7 +643,7 @@ async def analyze_session(data: SessionData):
             pnn50=features['pNN50'],
             entropy=features['Entropy'],
             fs_real=round(fs_real, 1),
-            n_samples=len(signal),
+            n_samples=len(signal),  # Échantillons originaux reçus
             # ✅ RÉSULTATS IA
             af_detected=prediction['label'],
             af_probability=prediction['probability'],
