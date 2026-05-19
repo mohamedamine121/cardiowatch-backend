@@ -1,7 +1,7 @@
 # ============================================================
 # app/routes/session.py - PIPELINE HRV COMPLET + IA
-# ✅ MODIFIÉ POUR 6000 @ 100 Hz (60s) + Interpolation → 7500 @ 125 Hz
-# ✅ COMPATIBILITÉ MIMIC 100% (7500 échantillons @ 125Hz après interpolation)
+# ✅ COMPATIBLE 7500 @ 125 Hz NATIF (Timer Hardware ESP32)
+# ✅ PAS D'INTERPOLATION - Signal authentique non déformé
 # Validation scientifique : PMC6953345, PMC4309304
 # ============================================================
  
@@ -12,7 +12,6 @@ import numpy as np
 import logging
 import joblib
 from pathlib import Path
-from scipy import signal as scipy_signal  # ✅ NOUVEAU : Pour interpolation
 
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
@@ -64,7 +63,7 @@ except Exception as e:
  
 class SessionData(BaseModel):
     patient_id: str
-    ppg_values: List[float]  # ✅ MODIFIÉ : 6000 échantillons @ 100Hz OU 7500 @ 125Hz
+    ppg_values: List[float]  # ✅ 7500 échantillons @ 125Hz NATIF (Timer ESP32)
     timestamps_us: List[int] = []  # Timestamps microsecondes (optionnel)
     spo2: int
     timestamp: str = ""
@@ -195,17 +194,17 @@ def predict_af(features: dict) -> dict:
 def validate_signal(signal: np.ndarray) -> None:
     """
     Valide le signal PPG avant traitement
-    ✅ MODIFIÉ : Accepte 6000 échantillons minimum (60s @ 100Hz)
+    ✅ MODIFIÉ : Accepte 7500 échantillons minimum (60s @ 125Hz natif ESP32)
     """
-    # ✅ MODIFIÉ : Longueur minimale 6000 échantillons (60s à 100Hz)
+    # ✅ MODIFIÉ : Longueur minimale 7500 échantillons (60s à 125Hz)
     # Validation scientifique :
     # - PMC6953345 : 60s validé pour HRV court terme et détection FA
-    # - ESP32 réel : 6000 échantillons @ 100 Hz (limite matérielle)
-    # - Backend : Interpolation scipy → 7500 @ 125Hz pour compatibilité MIMIC
-    if len(signal) < 6000:
+    # - ESP32 Timer : 7500 échantillons @ 125 Hz (précision ±0.01%)
+    # - Signal natif : PAS d'interpolation nécessaire
+    if len(signal) < 7500:
         raise HTTPException(
             status_code=400,
-            detail=f"Signal trop court : {len(signal)} échantillons (min 6000 pour 60s @ 100Hz)"
+            detail=f"Signal trop court : {len(signal)} échantillons (min 7500 pour 60s @ 125Hz)"
         )
     
     # Pas de NaN
@@ -239,7 +238,7 @@ def validate_signal(signal: np.ndarray) -> None:
 def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> float:
     """
     Calcule la fréquence d'échantillonnage réelle
-    ✅ MODIFIÉ : Support 6000 @ 100Hz et 7500 @ 125Hz
+    ✅ MODIFIÉ : Attend 125 Hz natif (Timer Hardware ESP32)
     """
     if timestamps_us and len(timestamps_us) >= 2:
         # Méthode 1 : Depuis timestamps microsecondes
@@ -256,70 +255,18 @@ def calculate_real_fs(signal: np.ndarray, timestamps_us: List[int] = None) -> fl
         
         logger.info(f"📊 FS estimée depuis longueur : {fs_real:.2f} Hz (assumant 60s)")
     
-    # ✅ MODIFIÉ : Validation range élargie 80-150 Hz
-    if not (80 <= fs_real <= 150):
+    # ✅ MODIFIÉ : Validation range strict 120-130 Hz (Timer ESP32 = 125 Hz)
+    if not (120 <= fs_real <= 130):
         raise HTTPException(
             status_code=400,
-            detail=f"Fréquence anormale : {fs_real:.2f} Hz (attendu 80-150 Hz)"
+            detail=f"Fréquence anormale : {fs_real:.2f} Hz (attendu 120-130 Hz pour Timer 125Hz)"
         )
     
     return fs_real
  
 # ============================================================
-# ÉTAPE 3 : INTERPOLATION 6000 → 7500 (NOUVEAU)
-# ============================================================
-
-def resample_to_125hz(signal: np.ndarray, fs_real: float) -> np.ndarray:
-    """
-    ✅ NOUVEAU : Interpolation scipy pour compatibilité MIMIC
-    
-    Si signal = 6000 @ 100Hz → Resample à 7500 @ 125Hz
-    Si signal = 7500 @ 125Hz → Pas d'interpolation
-    
-    Utilise scipy.signal.resample avec FFT pour interpolation de qualité
-    
-    Args:
-        signal: Signal PPG brut (6000 ou 7500 échantillons)
-        fs_real: Fréquence réelle calculée
-    
-    Returns:
-        Signal à 7500 échantillons @ 125Hz
-    """
-    
-    n_samples = len(signal)
-    target_samples = 7500
-    
-    # Si déjà 7500 échantillons, pas d'interpolation
-    if n_samples >= 7400 and n_samples <= 7600:  # Tolérance ±100
-        logger.info("=" * 60)
-        logger.info("✅ SIGNAL DÉJÀ À 125 Hz - Pas d'interpolation")
-        logger.info("=" * 60)
-        logger.info(f"   - Échantillons reçus : {n_samples}")
-        logger.info(f"   - Fréquence          : {fs_real:.1f} Hz")
-        logger.info("=" * 60)
-        return signal[:7500]  # Tronquer si > 7500
-    
-    # Sinon, interpoler à 7500
-    logger.info("=" * 60)
-    logger.info("🔄 INTERPOLATION SCIPY 100 Hz → 125 Hz")
-    logger.info("=" * 60)
-    logger.info(f"   - Échantillons avant : {n_samples} @ {fs_real:.1f} Hz")
-    logger.info(f"   - Échantillons après : {target_samples} @ 125.0 Hz")
-    logger.info(f"   - Méthode            : scipy.signal.resample (FFT)")
-    logger.info("=" * 60)
-    
-    # Interpolation avec scipy (méthode FFT)
-    signal_resampled = scipy_signal.resample(signal, target_samples)
-    
-    logger.info(f"✅ Interpolation terminée")
-    logger.info(f"   - Shape avant  : {signal.shape}")
-    logger.info(f"   - Shape après  : {signal_resampled.shape}")
-    logger.info("=" * 60)
-    
-    return signal_resampled
-
-# ============================================================
-# ÉTAPE 4 : FILTRAGE BUTTERWORTH
+# ÉTAPE 3 : FILTRAGE BUTTERWORTH
+# ✅ Signal déjà à 125 Hz natif - Pas d'interpolation nécessaire
 # ============================================================
  
 def filter_butterworth(signal: np.ndarray, fs: float) -> np.ndarray:
@@ -560,18 +507,18 @@ def calculate_hrv_features(ibi_clean: np.ndarray) -> dict:
 async def analyze_session(data: SessionData):
     """
     Pipeline HRV complet avec détection FA
-    ✅ MODIFIÉ : Support 6000 @ 100Hz + Interpolation → 7500 @ 125Hz
+    ✅ COMPATIBLE 7500 @ 125 Hz NATIF (Timer Hardware ESP32)
     
-    ✅ NOUVEAU : Prédiction FA avec XGBoost
-    ✅ MODIFIÉ POUR ESP32 RÉEL :
-    - Signal ESP32 : 6000 échantillons @ 100 Hz (limite matérielle)
-    - Interpolation scipy : 6000 → 7500 @ 125 Hz
+    ✅ Prédiction FA avec XGBoost
+    ✅ SIGNAL NATIF ESP32 :
+    - Signal ESP32 : 7500 échantillons @ 125 Hz (Timer Hardware précis)
+    - PAS d'interpolation : Signal authentique non déformé
     - Compatibilité MIMIC 100% (même fréquence que training)
     - Durée temporelle identique : 60s
     """
     
     logger.info("=" * 60)
-    logger.info("🚀 ANALYSE SESSION - DÉMARRAGE (100 Hz → 125 Hz)")
+    logger.info("🚀 ANALYSE SESSION - 7500 @ 125 Hz NATIF")
     logger.info("=" * 60)
     logger.info(f"Patient ID : {data.patient_id}")
     logger.info(f"Timestamp  : {data.timestamp}")
@@ -590,9 +537,11 @@ async def analyze_session(data: SessionData):
         logger.info("ÉTAPE 2/9 : Calcul fréquence d'échantillonnage")
         fs_real = calculate_real_fs(signal, data.timestamps_us)
         
-        # ── ÉTAPE 3 : Interpolation 6000 → 7500 ──────────
-        logger.info("ÉTAPE 3/9 : Interpolation à 125 Hz (si nécessaire)")
-        signal_125hz = resample_to_125hz(signal, fs_real)
+        # ── ÉTAPE 3 : Validation 125 Hz natif ─────────────
+        logger.info("ÉTAPE 3/9 : Signal 125 Hz natif (Timer ESP32)")
+        logger.info(f"✅ Signal authentique : {len(signal)} échantillons @ {fs_real:.2f} Hz")
+        logger.info("⏭️  Pas d'interpolation nécessaire (signal déjà à 125 Hz)")
+        signal_125hz = signal  # ✅ Pas de transformation, signal natif
         
         # ── ÉTAPE 4 : Filtrage Butterworth ────────────────
         logger.info("ÉTAPE 4/9 : Filtrage Butterworth")
@@ -622,11 +571,11 @@ async def analyze_session(data: SessionData):
         logger.info("ÉTAPE 8/9 : Filtrage outliers")
         ibi_clean = filter_outliers(ibi_ms)
         
-        # ── ÉTAPE 9 : Features HRV ────────────────────────
+        # ── ÉTAPE 9 : Features HRV + PRÉDICTION IA ────────
         logger.info("ÉTAPE 9/9 : Calcul features HRV")
         features = calculate_hrv_features(ibi_clean)
         
-        # ── ÉTAPE 10 : PRÉDICTION IA FA ───────────────────
+        # ── Prédiction IA FA ──────────────────────────────
         prediction = predict_af(features)
         
         # ── Retour résultat ───────────────────────────────
