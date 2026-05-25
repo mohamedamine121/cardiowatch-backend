@@ -448,11 +448,13 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
         logger.warning(f"⚠️ Utilisation filtre physio seul")
         ibi_clean = np.array(ibi_clean, dtype=np.float64)
     
-    # ✅ MODIFIÉ : Minimum 20 IBI valides (au lieu de 30 pour signal PPG réel)
-    if len(ibi_clean) < 20:
+    # ✅ ALIGNÉ TRAINING MIMIC : Minimum 8 IBI valides
+    # Training MIMIC utilise len(ibi_valid) >= 8
+    # Même si 20 serait scientifiquement meilleur, on garde 8 pour compatibilité modèle
+    if len(ibi_clean) < 8:
         raise HTTPException(
             status_code=422,
-            detail=f"Trop peu d'IBI valides : {len(ibi_clean)} (min 20)"
+            detail=f"Trop peu d'IBI valides : {len(ibi_clean)} (min 8, training MIMIC)"
         )
     
     logger.info(f"✅ Filtrage outliers terminé : {n_initial} → {len(ibi_clean)} IBI conservés")
