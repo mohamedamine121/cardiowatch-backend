@@ -13,6 +13,14 @@ import logging
 import joblib
 from pathlib import Path
 
+# ✅ AJOUTÉ: Imports hrv-analysis pour alignment avec training MIMIC
+from hrvanalysis import (
+    remove_outliers,
+    remove_ectopic_beats,
+    interpolate_nan_values,
+    get_time_domain_features
+)
+
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -301,7 +309,7 @@ def filter_butterworth(signal: np.ndarray, fs: float) -> np.ndarray:
 def detect_peaks_heartpy(signal: np.ndarray, fs: float):
     """
     Détection pics avec HeartPy
-    ✅ MODIFIÉ : Paramètres relâchés pour signal PPG réel
+    ✅ ALIGNÉ TRAINING MIMIC : high_precision=True + clean_rr=True
     """
     import heartpy as hp
     
@@ -310,18 +318,22 @@ def detect_peaks_heartpy(signal: np.ndarray, fs: float):
     logger.info(f"   - Sampling rate : {fs} Hz")
     
     try:
-        # ✅ MODIFIÉ : Paramètres relâchés pour PPG ESP32
+        # ✅ MODIFIÉ : Paramètres alignés sur training MIMIC
         working_data, measures = hp.process(
             signal,
             sample_rate=fs,
-            bpmmin=30,              # ✅ MODIFIÉ : 40 → 30 BPM
-            bpmmax=180,             # ✅ MODIFIÉ : 150 → 180 BPM
-            high_precision=False,   # ✅ MODIFIÉ : True → False
-            reject_segmentwise=False  # ✅ NOUVEAU : Désactiver rejet segments
+            bpmmin=30,                  # Range large pour PPG
+            bpmmax=180,                 # Range large pour PPG
+            high_precision=True,        # ✅ MODIFIÉ: False → True (training MIMIC)
+            clean_rr=True,              # ✅ AJOUTÉ: Nettoyage auto IBI (training MIMIC)
+            clean_rr_method='iqr',      # ✅ AJOUTÉ: Méthode IQR (training MIMIC)
+            reject_segmentwise=False    # Désactiver rejet segments
         )
         
         n_peaks = len(working_data['peaklist'])
         logger.info(f"✅ HeartPy détection réussie : {n_peaks} pics détectés")
+        logger.info(f"   - high_precision : True (algorithme Pan-Tompkins amélioré)")
+        logger.info(f"   - clean_rr       : True (nettoyage auto outliers IQR)")
         
         return working_data, measures
         
@@ -386,64 +398,55 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
             detail="Aucun IBI valide après filtre physiologique"
         )
     
-    # ── Niveau 2 : Filtre Malik 50% ─────────────────────────
-    # ✅ MODIFIÉ : Malik 50% au lieu de 20% (signal PPG plus bruité)
+    # ── Niveau 2 : Filtre Malik 20% (TRAINING MIMIC) ─────────
+    # ✅ MODIFIÉ : Malik 20% (standard médical Task Force 1996)
+    # Training MIMIC utilise remove_ectopic_beats avec Malik 20% implicite
     try:
-        from hrvanalysis.preprocessing import remove_outliers
+        logger.info(f"🔍 Avant Malik - {len(ibi_clean)} IBI")
         
-        logger.info(f"🔍 DEBUG : AVANT Malik - Type: {type(ibi_clean)}, Len: {len(ibi_clean)}")
-        logger.info(f"🔍 DEBUG : AVANT Malik - Premiers IBI: {ibi_clean[:5] if len(ibi_clean) >= 5 else ibi_clean}")
-        
-        # ✅ MODIFIÉ : Malik threshold 50% au lieu de 20%
-        ibi_malik = remove_outliers(
+        # ÉTAPE 2a : Remove outliers (400-1500 ms comme training)
+        ibi_outliers = remove_outliers(
             rr_intervals=ibi_clean,
-            low_rri=300,
-            high_rri=2000,
+            low_rri=400,
+            high_rri=1500,
             verbose=False
         )
         
-        logger.info(f"🔍 DEBUG : APRÈS Malik (AVANT nettoyage NaN) - Type: {type(ibi_malik)}, Len: {len(ibi_malik) if hasattr(ibi_malik, '__len__') else 'N/A'}")
+        # ÉTAPE 2b : Malik filter 20% (méthode training MIMIC)
+        ibi_malik = remove_ectopic_beats(
+            rr_intervals=ibi_outliers,
+            method='malik',  # ✅ Malik 20% par défaut (training MIMIC)
+            verbose=False
+        )
         
+        # Vérifier résultat
         if ibi_malik is None or len(ibi_malik) == 0:
-            logger.warning(f"⚠️ Malik a retourné None ou liste vide, filtre physio seul utilisé")
-            ibi_malik = ibi_clean  # Garder filtre physio
-        
-        # ✅ CORRECTION : Supprimer les NaN introduits par Malik
-        if isinstance(ibi_malik, list):
-            ibi_malik = [x for x in ibi_malik if not np.isnan(x)]
-            n_after_malik = len(ibi_malik)
-            logger.info(f"📊 Filtre Malik 50%     : {n_after_physio} → {n_after_malik} IBI")
-            
-            if n_after_malik == 0:
-                logger.error(f"❌ ERREUR : Malik a retourné une liste vide après nettoyage NaN !")
-                ibi_malik = ibi_clean  # Garder filtre physio
-            
-            logger.info(f"🔍 DEBUG : APRÈS Malik (APRÈS nettoyage NaN) - Premiers IBI: {ibi_malik[:5] if len(ibi_malik) >= 5 else ibi_malik}")
-        else:
-            logger.error(f"❌ ERREUR : Type inattendu après Malik: {type(ibi_malik)}")
+            logger.warning(f"⚠️ Malik a retourné None ou liste vide")
             ibi_malik = ibi_clean
+        else:
+            logger.info(f"📊 Filtre Malik 20%     : {n_after_physio} → {len(ibi_malik)} IBI")
         
-        ibi_clean = ibi_malik
+        # ✅ MODIFIÉ : INTERPOLATION NaN au lieu de SUPPRESSION (training MIMIC)
+        # Training utilise interpolate_nan_values pour préserver continuité temporelle
+        logger.info(f"🔍 Interpolation NaN (méthode training MIMIC)...")
+        ibi_clean = interpolate_nan_values(
+            rr_intervals=ibi_malik,
+            interpolation_method='linear'  # Méthode training MIMIC
+        )
+        
+        # Convertir en array numpy et supprimer NaN restants (edge cases)
+        ibi_clean = np.array(ibi_clean, dtype=np.float64)
+        ibi_clean = ibi_clean[~np.isnan(ibi_clean)]
+        
+        logger.info(f"📊 Après interpolation   : {len(ibi_clean)} IBI valides")
         
     except Exception as e:
         # Si Malik échoue, garder filtre physio seulement
-        logger.error(f"❌ EXCEPTION Malik : {e}")
-        logger.error(f"🔍 DEBUG : Exception type: {type(e).__name__}")
+        logger.error(f"❌ EXCEPTION Malik/Interpolation : {e}")
         import traceback
-        logger.error(f"🔍 DEBUG : Traceback:\n{traceback.format_exc()}")
-        logger.warning(f"⚠️ Malik échoué, filtre physio seul utilisé")
-    
-    # Convertir en array numpy
-    logger.info(f"🔍 DEBUG : AVANT conversion numpy - Type: {type(ibi_clean)}, Len: {len(ibi_clean) if hasattr(ibi_clean, '__len__') else 'N/A'}")
-    ibi_clean = np.array(ibi_clean, dtype=np.float64)
-    logger.info(f"🔍 DEBUG : APRÈS conversion numpy - Shape: {ibi_clean.shape}, Len: {len(ibi_clean)}")
-    
-    # Vérifier pas de NaN
-    if np.any(np.isnan(ibi_clean)):
-        raise HTTPException(
-            status_code=422,
-            detail="IBI contient NaN après filtrage outliers"
-        )
+        logger.error(f"🔍 Traceback:\n{traceback.format_exc()}")
+        logger.warning(f"⚠️ Utilisation filtre physio seul")
+        ibi_clean = np.array(ibi_clean, dtype=np.float64)
     
     # ✅ MODIFIÉ : Minimum 20 IBI valides (au lieu de 30 pour signal PPG réel)
     if len(ibi_clean) < 20:
@@ -463,32 +466,31 @@ def filter_outliers(ibi_ms: np.ndarray) -> np.ndarray:
 def calculate_hrv_features(ibi_clean: np.ndarray) -> dict:
     """
     Calcule features HRV TIME-DOMAIN
-    IDENTIQUE au code training MIMIC
+    ✅ ALIGNÉ TRAINING MIMIC : get_time_domain_features + Entropie exacte
     """
-    from hrvanalysis import get_time_domain_features
-    from scipy.stats import entropy as scipy_entropy
-    
     # Mean BPM depuis IBI
     mean_bpm = 60000.0 / np.mean(ibi_clean)
     
-    # Features HRV
+    # Features HRV avec bibliothèque hrv-analysis (training MIMIC)
     features = get_time_domain_features(ibi_clean.tolist())
     
-    # Entropie Shannon (IDENTIQUE training)
-    hist, _ = np.histogram(ibi_clean, bins=50, density=True)
-    hist = hist[hist > 0]
-    shannon_entropy = scipy_entropy(hist, base=2)
+    # ✅ Entropie Shannon EXACTE (training MIMIC)
+    # Copié EXACTEMENT du notebook training
+    hist, _ = np.histogram(ibi_clean, bins=20, density=True)  # ✅ bins=20 (training)
+    hist = hist + 1e-10          # ✅ Éviter log(0)
+    hist = hist / hist.sum()     # ✅ Normaliser
+    shannon_entropy = float(-np.sum(hist * np.log2(hist)))  # ✅ Formule exacte
     
     result = {
         'Mean_BPM': round(mean_bpm, 1),
         'SDNN': round(features['sdnn'], 1),
         'RMSSD': round(features['rmssd'], 1),
-        'pNN50': round(features['pnni_50'], 1),  # ⚠️ Attention : pnni_50
+        'pNN50': round(features['pnni_50'], 1),  # hrv-analysis utilise pnni_50
         'Entropy': round(shannon_entropy, 4)
     }
     
     logger.info("=" * 60)
-    logger.info("📊 FEATURES HRV CALCULÉES")
+    logger.info("📊 FEATURES HRV CALCULÉES (Training MIMIC)")
     logger.info("=" * 60)
     logger.info(f"Mean_BPM : {result['Mean_BPM']:.1f} BPM")
     logger.info(f"SDNN     : {result['SDNN']:.1f} ms")
@@ -530,49 +532,40 @@ async def analyze_session(data: SessionData):
         signal = np.array(data.ppg_values, dtype=np.float64)
         
         # ── ÉTAPE 1 : Validation ──────────────────────────
-        logger.info("ÉTAPE 1/9 : Validation signal")
+        logger.info("ÉTAPE 1/8 : Validation signal")
         validate_signal(signal)
         
         # ── ÉTAPE 2 : Calcul FS réelle ────────────────────
-        logger.info("ÉTAPE 2/9 : Calcul fréquence d'échantillonnage")
+        logger.info("ÉTAPE 2/8 : Calcul fréquence d'échantillonnage")
         fs_real = calculate_real_fs(signal, data.timestamps_us)
         
         # ── ÉTAPE 3 : Validation 125 Hz natif ─────────────
-        logger.info("ÉTAPE 3/9 : Signal 125 Hz natif (Timer ESP32)")
+        logger.info("ÉTAPE 3/8 : Signal 125 Hz natif (Timer ESP32)")
         logger.info(f"✅ Signal authentique : {len(signal)} échantillons @ {fs_real:.2f} Hz")
         logger.info("⏭️  Pas d'interpolation nécessaire (signal déjà à 125 Hz)")
         signal_125hz = signal  # ✅ Pas de transformation, signal natif
         
         # ── ÉTAPE 4 : Filtrage Butterworth ────────────────
-        logger.info("ÉTAPE 4/9 : Filtrage Butterworth")
+        logger.info("ÉTAPE 4/8 : Filtrage Butterworth")
         signal_filtered = filter_butterworth(signal_125hz, fs=125)
         
-        # ── ÉTAPE 5 : Normalisation pour HeartPy ──────────
-        logger.info("ÉTAPE 5/9 : Normalisation Z-score")
-        signal_mean = np.mean(signal_filtered)
-        signal_std = np.std(signal_filtered)
+        # ── ÉTAPE 5 : Détection pics HeartPy ──────────────
+        # ✅ ALIGNÉ TRAINING MIMIC : high_precision=True + clean_rr=True
+        # Normalisation Z-score SUPPRIMÉE (training n'en utilise pas)
+        logger.info("ÉTAPE 5/8 : Détection pics HeartPy (signal brut)")
+        working_data, measures = detect_peaks_heartpy(signal_filtered, fs=125)
         
-        if signal_std > 0:
-            signal_normalized = (signal_filtered - signal_mean) / signal_std
-            logger.info(f"✅ Signal normalisé : mean=0, std=1")
-        else:
-            signal_normalized = signal_filtered
-            logger.warning(f"⚠️ Signal std=0, normalisation ignorée")
-        
-        # ── ÉTAPE 6 : Détection pics HeartPy ──────────────
-        logger.info("ÉTAPE 6/9 : Détection pics HeartPy")
-        working_data, measures = detect_peaks_heartpy(signal_normalized, fs=125)
-        
-        # ── ÉTAPE 7 : Calcul IBI ──────────────────────────
-        logger.info("ÉTAPE 7/9 : Calcul IBI (Inter-Beat Intervals)")
+        # ── ÉTAPE 6 : Calcul IBI ──────────────────────────
+        logger.info("ÉTAPE 6/8 : Calcul IBI (Inter-Beat Intervals)")
         ibi_ms = calculate_ibi(working_data, fs=125)
         
-        # ── ÉTAPE 8 : Filtrage outliers ───────────────────
-        logger.info("ÉTAPE 8/9 : Filtrage outliers")
+        # ── ÉTAPE 7 : Filtrage outliers + Malik 20% ───────
+        # ✅ ALIGNÉ TRAINING MIMIC : Malik 20% + interpolation NaN
+        logger.info("ÉTAPE 7/8 : Filtrage outliers + Malik 20%")
         ibi_clean = filter_outliers(ibi_ms)
         
-        # ── ÉTAPE 9 : Features HRV + PRÉDICTION IA ────────
-        logger.info("ÉTAPE 9/9 : Calcul features HRV")
+        # ── ÉTAPE 8 : Features HRV + PRÉDICTION IA ────────
+        logger.info("ÉTAPE 8/8 : Calcul features HRV")
         features = calculate_hrv_features(ibi_clean)
         
         # ── Prédiction IA FA ──────────────────────────────
