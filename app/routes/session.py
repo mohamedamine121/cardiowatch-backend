@@ -12,6 +12,7 @@ import numpy as np
 import logging
 import joblib
 from pathlib import Path
+from datetime import datetime  # ✅ AJOUTÉ: Pour timestamp + minute enregistrement
 
 # ✅ AJOUTÉ: Imports hrv-analysis pour alignment avec training MIMIC
 from hrvanalysis import (
@@ -20,6 +21,9 @@ from hrvanalysis import (
     interpolate_nan_values,
     get_time_domain_features
 )
+
+# ✅ AJOUTÉ: Collection MongoDB pour enregistrement des sessions HRV
+from app.database import hrv_collection
 
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
@@ -572,6 +576,59 @@ async def analyze_session(data: SessionData):
         
         # ── Prédiction IA FA ──────────────────────────────
         prediction = predict_af(features)
+        
+        # ══════════════════════════════════════════════════════════
+        # ✅ ENREGISTREMENT MONGODB (collection hrv_windows)
+        # ══════════════════════════════════════════════════════════
+        # Règle : NE PAS enregistrer si IA échoue (label == -1)
+        # Apparaîtra automatiquement dans :
+        #   - Historique (GET /history)
+        #   - Alertes (GET /alerts) si label == 1
+        if prediction['label'] != -1:
+            try:
+                now = datetime.utcnow()
+                
+                # Status selon prédiction (format identique à la BDD existante)
+                status_label = "FA Détectée" if prediction['label'] == 1 else "Normal"
+                
+                hrv_document = {
+                    "patient_id": data.patient_id,  # ✅ DYNAMIQUE (chaque patient son ID)
+                    "session_id": f"session_{now.strftime('%Y%m%d_%H%M%S')}",
+                    "minute": now.minute,           # ✅ Minute de l'heure actuelle
+                    "timestamp": now,               # ✅ datetime (pour .strftime des endpoints)
+                    "mean_bpm": features['Mean_BPM'],
+                    "spo2": data.spo2,
+                    "label": prediction['label'],   # 0 = Normal, 1 = FA
+                    "status": status_label,
+                    "sdnn": features['SDNN'],
+                    "rmssd": features['RMSSD'],
+                    "pnn50": features['pNN50'],
+                    "entropy": features['Entropy'],
+                    "activite": "repos",
+                }
+                
+                insert_result = await hrv_collection.insert_one(hrv_document)
+                
+                logger.info("=" * 60)
+                logger.info("💾 SESSION ENREGISTRÉE DANS MONGODB")
+                logger.info("=" * 60)
+                logger.info(f"   - Collection : hrv_windows")
+                logger.info(f"   - _id        : {insert_result.inserted_id}")
+                logger.info(f"   - patient_id : {data.patient_id}")
+                logger.info(f"   - session_id : {hrv_document['session_id']}")
+                logger.info(f"   - label      : {prediction['label']} ({status_label})")
+                logger.info("=" * 60)
+                
+            except Exception as db_error:
+                # ⚠️ Si enregistrement échoue, on log mais on NE bloque PAS l'analyse
+                # L'utilisateur reçoit quand même son résultat
+                logger.error("=" * 60)
+                logger.error("⚠️ ÉCHEC ENREGISTREMENT MONGODB (analyse renvoyée quand même)")
+                logger.error("=" * 60)
+                logger.error(f"Erreur : {str(db_error)}")
+                logger.error("=" * 60)
+        else:
+            logger.warning("⚠️ IA indisponible (label=-1) → session NON enregistrée")
         
         # ── Retour résultat ───────────────────────────────
         logger.info("=" * 60)
