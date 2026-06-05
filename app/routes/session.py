@@ -36,29 +36,37 @@ router = APIRouter()
 # ============================================================
 
 BASE_DIR = Path(__file__).parent.parent.parent
-MODEL_PATH = BASE_DIR / "models" / "xgboost_cardiowatch.pkl"
-SCALER_PATH = BASE_DIR / "models" / "scaler.pkl"
+XGB_PATH    = BASE_DIR / "models" / "xgboost_final_lopo.pkl"
+RF_PATH     = BASE_DIR / "models" / "random_forest_final_lopo.pkl"
+SCALER_PATH = BASE_DIR / "models" / "scaler_final_lopo.pkl"
 
 try:
-    model_xgboost = joblib.load(MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
+    model_xgboost = joblib.load(XGB_PATH)
+    model_rf      = joblib.load(RF_PATH)
+    scaler        = joblib.load(SCALER_PATH)
     logger.info("=" * 60)
-    logger.info("✅ MODÈLES IA CHARGÉS AVEC SUCCÈS")
+    logger.info("✅ MODÈLES ENSEMBLE IA CHARGÉS AVEC SUCCÈS")
     logger.info("=" * 60)
-    logger.info(f"📁 XGBoost : {MODEL_PATH}")
-    logger.info(f"📁 Scaler  : {SCALER_PATH}")
+    logger.info(f"📁 XGBoost      : {XGB_PATH}")
+    logger.info(f"📁 RandomForest : {RF_PATH}")
+    logger.info(f"📁 Scaler       : {SCALER_PATH}")
+    logger.info("   Ensemble = moyenne(XGBoost, RandomForest)")
+    logger.info("   Validation : LOPO 35 patients | Accuracy 95.3%")
     logger.info("=" * 60)
 except FileNotFoundError as e:
     logger.error("=" * 60)
     logger.error("❌ FICHIERS MODÈLES INTROUVABLES")
     logger.error("=" * 60)
     logger.error(f"Erreur: {e}")
-    logger.error(f"Chemin recherché : {MODEL_PATH}")
-    logger.error("Vérifier que /models/ contient xgboost_cardiowatch.pkl et scaler.pkl")
+    logger.error("Vérifier que /models/ contient :")
+    logger.error("  - xgboost_final_lopo.pkl")
+    logger.error("  - random_forest_final_lopo.pkl")
+    logger.error("  - scaler_final_lopo.pkl")
     logger.error("⚠️ MODE DÉGRADÉ : Calcul HRV uniquement (pas de prédiction FA)")
     logger.error("=" * 60)
     model_xgboost = None
-    scaler = None
+    model_rf      = None
+    scaler        = None
 except Exception as e:
     logger.error("=" * 60)
     logger.error("❌ ERREUR CHARGEMENT MODÈLES IA")
@@ -67,7 +75,8 @@ except Exception as e:
     logger.error("⚠️ MODE DÉGRADÉ : Calcul HRV uniquement (pas de prédiction FA)")
     logger.error("=" * 60)
     model_xgboost = None
-    scaler = None
+    model_rf      = None
+    scaler        = None
 
 # ============================================================
 # MODÈLES DE DONNÉES
@@ -115,8 +124,8 @@ def predict_af(features: dict) -> dict:
         - confidence: 0-100% ou None
     """
     
-    # Vérifier que modèles sont chargés
-    if model_xgboost is None or scaler is None:
+    # Vérifier que les 3 modèles sont chargés
+    if model_xgboost is None or model_rf is None or scaler is None:
         logger.warning("⚠️ Modèles IA non disponibles - Prédiction impossible")
         logger.warning("   Mode dégradé : Features HRV calculées sans prédiction FA")
         return {
@@ -152,14 +161,18 @@ def predict_af(features: dict) -> dict:
         X_scaled = scaler.transform(X)
         logger.info("✅ Normalisation appliquée (StandardScaler)")
         
-        # ── Prédire avec XGBoost ──
-        label = int(model_xgboost.predict(X_scaled)[0])
-        proba_array = model_xgboost.predict_proba(X_scaled)[0]
-        proba_fa = float(proba_array[1])  # Probabilité classe 1 (FA)
-        
-        logger.info("🎯 Prédiction XGBoost :")
-        logger.info(f"   - Proba Normal : {proba_array[0]:.4f}")
-        logger.info(f"   - Proba FA     : {proba_array[1]:.4f}")
+        # ── Prédiction Ensemble (XGBoost + RandomForest en parallèle) ──
+        # Les 2 modèles reçoivent les MÊMES features, en même temps
+        # La décision finale = moyenne des 2 probabilités (soft voting)
+        proba_xgb = float(model_xgboost.predict_proba(X_scaled)[0][1])
+        proba_rf  = float(model_rf.predict_proba(X_scaled)[0][1])
+        proba_fa  = (proba_xgb + proba_rf) / 2.0   # Ensemble = moyenne
+        label     = 1 if proba_fa >= 0.5 else 0
+
+        logger.info("🎯 Prédiction Ensemble (XGBoost + RandomForest) :")
+        logger.info(f"   - Proba FA XGBoost : {proba_xgb:.4f}")
+        logger.info(f"   - Proba FA RF      : {proba_rf:.4f}")
+        logger.info(f"   - Proba FA Ensemble: {proba_fa:.4f} (moyenne des 2)")
         
         # ── Calculer risque et confiance ──
         if label == 1:
